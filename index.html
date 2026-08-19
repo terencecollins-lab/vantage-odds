@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Vantage — Find the best price, fast</title>
+  <title>Vantage — Live odds comparison, fast</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📈</text></svg>" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -19,7 +19,7 @@
       </div>
       <div class="search-wrap">
         <svg class="search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/><path d="M21 21l-4.3-4.3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-        <input id="search-input" type="text" placeholder="Search tracked items…" autocomplete="off" />
+        <input id="search-input" type="text" placeholder="Search matchups or markets…" autocomplete="off" />
       </div>
       <div class="topbar-actions">
         <button id="watchlist-toggle" class="chip-btn" title="Show watchlist only">
@@ -33,28 +33,34 @@
       </div>
     </header>
 
+    <p id="status-banner" class="status-banner" hidden></p>
+
     <section class="stats-row" id="stats-row"></section>
 
     <section class="controls-row">
       <div class="category-chips" id="category-chips"></div>
-      <div class="sort-wrap">
-        <label for="sort-select">Sort</label>
-        <select id="sort-select">
-          <option value="savings">Best savings</option>
-          <option value="price-asc">Price: low to high</option>
-          <option value="price-desc">Price: high to low</option>
-          <option value="rating">Rating</option>
-        </select>
+      <div class="controls-right">
+        <div class="sort-wrap">
+          <label for="league-select">League</label>
+          <select id="league-select"></select>
+        </div>
+        <div class="sort-wrap">
+          <label for="sort-select">Sort</label>
+          <select id="sort-select">
+            <option value="edge">Best edge vs. fair</option>
+            <option value="soonest">Starting soonest</option>
+          </select>
+        </div>
       </div>
     </section>
 
     <main>
       <div class="card-grid" id="card-grid"></div>
-      <p class="empty-state" id="empty-state" hidden>No tracked items match your filters.</p>
+      <p class="empty-state" id="empty-state" hidden>No live markets match your filters.</p>
     </main>
 
     <footer class="app-footer">
-      Vantage is a demo dashboard. Prices shown are sample data for illustration only.
+      Vantage displays real odds data licensed from <a href="https://sportsgameodds.com" target="_blank" rel="noopener">SportsGameOdds</a>. It does not accept wagers or process payments — it only compares publicly posted sportsbook lines. "Best" and "fair" odds are informational estimates, not guarantees. 18+ only where applicable; check local regulations before wagering with any linked sportsbook.
     </footer>
   </div>
 
