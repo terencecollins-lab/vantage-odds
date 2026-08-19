@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Vantage — Find the best price, fast</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📈</text></svg>" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">V</span>
+        <span class="brand-name">Vantage</span>
+      </div>
+      <div class="search-wrap">
+        <svg class="search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/><path d="M21 21l-4.3-4.3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        <input id="search-input" type="text" placeholder="Search tracked items…" autocomplete="off" />
+      </div>
+      <div class="topbar-actions">
+        <button id="watchlist-toggle" class="chip-btn" title="Show watchlist only">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M12 17.3l-6.2 3.6 1.6-7-5.4-4.7 7.1-.6L12 2l2.9 6.6 7.1.6-5.4 4.7 1.6 7z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>
+          <span>Watchlist</span>
+          <span id="watchlist-count" class="count-badge">0</span>
+        </button>
+        <button id="theme-toggle" class="icon-btn" title="Toggle theme">
+          <svg id="theme-icon" width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M12 3a9 9 0 109 9 7 7 0 01-9-9z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <section class="stats-row" id="stats-row"></section>
+
+    <section class="controls-row">
+      <div class="category-chips" id="category-chips"></div>
+      <div class="sort-wrap">
+        <label for="sort-select">Sort</label>
+        <select id="sort-select">
+          <option value="savings">Best savings</option>
+          <option value="price-asc">Price: low to high</option>
+          <option value="price-desc">Price: high to low</option>
+          <option value="rating">Rating</option>
+        </select>
+      </div>
+    </section>
+
+    <main>
+      <div class="card-grid" id="card-grid"></div>
+      <p class="empty-state" id="empty-state" hidden>No tracked items match your filters.</p>
+    </main>
+
+    <footer class="app-footer">
+      Vantage is a demo dashboard. Prices shown are sample data for illustration only.
+    </footer>
+  </div>
+
+  <div class="modal-backdrop" id="modal-backdrop" hidden>
+    <div class="modal" id="modal-content" role="dialog" aria-modal="true"></div>
+  </div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
