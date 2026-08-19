@@ -1,4 +1,4 @@
-import { LEAGUES, MARKET_TYPES, fetchLiveItems, formatAmerican } from './odds.js';
+import { LEAGUES, MARKET_TYPES, fetchLiveItems, fetchGameLog, formatAmerican } from './odds.js';
 import { SAMPLE_ITEMS } from './sample-odds.js';
 
 const WATCHLIST_KEY = 'vantage.watchlist';
@@ -214,10 +214,15 @@ function openModal(id) {
       ${item.fairOdds ? `<span class="market-price">${formatAmerican(item.fairOdds)} fair</span>` : ''}
       ${item.edgePct != null ? `<span class="savings-pct">${item.edgePct >= 0 ? '+' : ''}${item.edgePct}% vs. fair odds</span>` : ''}
     </div>
-    <table class="vendor-table">
+    ${
+      item.bookmakers.length
+        ? `<table class="vendor-table">
       <thead><tr><th>Sportsbook</th><th>Odds</th><th></th></tr></thead>
       <tbody>${rows}</tbody>
-    </table>
+    </table>`
+        : '<p class="form-note">No per-bookmaker breakdown at this API tier — showing the consensus line only.</p>'
+    }
+    ${item.playerID ? '<div id="recent-form" class="recent-form"><h3>Recent form</h3><p class="form-note">Loading…</p></div>' : ''}
     <div class="modal-actions">
       <button class="btn-secondary" id="modal-star">${isWatched ? '★ Remove from watchlist' : '☆ Add to watchlist'}</button>
       <button class="btn-primary" id="modal-close-2">Close</button>
@@ -230,6 +235,71 @@ function openModal(id) {
     toggleWatchlist(item.id);
     openModal(item.id);
   });
+  if (item.playerID) renderRecentForm(item);
+}
+
+function isHit(statValue, line, side) {
+  if (line == null) return null;
+  return side === 'under' ? statValue < line : statValue > line;
+}
+
+function formGuideDots(games, line, side, cap = 20) {
+  if (!games.length) return '<span class="form-empty">No recent games found</span>';
+  const dots = games
+    .slice(0, cap)
+    .map((g) => {
+      const hit = isHit(g.statValue, line, side);
+      const cls = hit == null ? '' : hit ? 'hit' : 'miss';
+      const title = `vs ${g.opponentName}: ${g.statValue}`;
+      return `<span class="form-dot ${cls}" title="${title}"></span>`;
+    })
+    .join('');
+  const more = games.length > cap ? `<span class="form-more">+${games.length - cap} more</span>` : '';
+  return dots + more;
+}
+
+function hitRateLabel(games, line, side) {
+  if (!games.length) return '—';
+  const hits = games.filter((g) => isHit(g.statValue, line, side)).length;
+  return `${hits}/${games.length}`;
+}
+
+function coverageNote(coverage, gamesPlayed) {
+  if (!coverage?.earliestAvailable) return 'No historical events were returned to scan.';
+  const earliest = new Date(coverage.earliestAvailable);
+  const years = (Date.now() - earliest.getTime()) / (1000 * 60 * 60 * 24 * 365.25);
+  const dateLabel = earliest.toLocaleDateString(undefined, { month: 'short', year: 'numeric' });
+  const seasonCaveat = years < 4.5 ? ` SportsGameOdds' data for this league only goes back this far — a full 5 seasons isn't available.` : '';
+  return `Scanned all ${coverage.eventsScanned} finalized games back to ${dateLabel} (${gamesPlayed} played by this player).${seasonCaveat}`;
+}
+
+async function renderRecentForm(item) {
+  const container = document.getElementById('recent-form');
+  if (!container) return;
+  try {
+    const { games, h2h, coverage } = await fetchGameLog({
+      league: item.league,
+      teamID: item.playerTeamID,
+      playerID: item.playerID,
+      statID: item.statID,
+      opponentTeamID: item.opponentTeamID,
+    });
+    const last5 = games.slice(0, 5);
+    const last10 = games.slice(0, 10);
+    const last5H2H = h2h.slice(0, 5);
+    container.innerHTML = `
+      <h3>Recent form</h3>
+      <div class="form-row"><span class="form-label">Last 5</span><span class="form-dots">${formGuideDots(last5, item.line, item.side)}</span><span class="form-rate">${hitRateLabel(last5, item.line, item.side)}</span></div>
+      <div class="form-row"><span class="form-label">Last 10</span><span class="form-dots">${formGuideDots(last10, item.line, item.side)}</span><span class="form-rate">${hitRateLabel(last10, item.line, item.side)}</span></div>
+      <div class="form-row"><span class="form-label">All seasons</span><span class="form-dots">${formGuideDots(games, item.line, item.side)}</span><span class="form-rate">${hitRateLabel(games, item.line, item.side)}</span></div>
+      <div class="form-row"><span class="form-label">Last 5 H2H</span><span class="form-dots">${formGuideDots(last5H2H, item.line, item.side)}</span><span class="form-rate">${hitRateLabel(last5H2H, item.line, item.side)}</span></div>
+      <div class="form-row"><span class="form-label">All-time H2H</span><span class="form-dots">${formGuideDots(h2h, item.line, item.side)}</span><span class="form-rate">${hitRateLabel(h2h, item.line, item.side)}</span></div>
+      <p class="form-note">Dots show most recent first. Green = would have hit ${item.side === 'under' ? 'under' : 'over'} ${item.line ?? ''}.</p>
+      <p class="form-note">${coverageNote(coverage, games.length)}</p>
+    `;
+  } catch (err) {
+    container.innerHTML = `<p class="form-note">Recent form unavailable (${err.message}).</p>`;
+  }
 }
 
 function closeModal() {
