@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: vantage
+    runtime: python
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python3 server.py"
+    envVars:
+      - key: SPORTSGAMEODDS_API_KEY
+        sync: false

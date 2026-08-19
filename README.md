@@ -29,6 +29,17 @@ python3 server.py
 
 Then open http://localhost:5173
 
+## Deploy to Render (free)
+
+This is what lets the [VantageIOS](../VantageIOS) app work on a real device, since a physical phone can't reach your Mac's `localhost`. Render's free tier needs no credit card, stays deployed indefinitely, and gives you a free HTTPS URL (cold starts after ~15 min idle — the first request after that takes 30-50s).
+
+1. Push this `Vantage` folder to a GitHub repo (public or private — either works with Render).
+2. In the [Render dashboard](https://dashboard.render.com), New → Web Service → connect that repo. Render should auto-detect `render.yaml` (already in this folder) and pre-fill the build/start commands.
+3. Under Environment, add `SPORTSGAMEODDS_API_KEY` with your key — this replaces the local `.env` file, which never gets committed.
+4. Deploy. Once it's live, note the `https://<something>.onrender.com` URL — that's both the web dashboard (now public) and the API the iOS app should point at.
+
+Since this makes the API-comparison proxy reachable by anyone with the URL (not just you), keep in mind it draws against your own SportsGameOdds quota if someone else finds and hits it. There's no auth on it currently — add some (a shared-secret header, for instance) if that's a concern for your key's rate limits.
+
 ## Notes / limitations
 
 - Only full-game Moneyline, Spread, and Total markets get a per-bookmaker comparison table — that's what's available on the free/base API tier. Player props are included too, but only as a single "Consensus" line (no per-book breakdown at this tier), plus the recent-form section described below.
