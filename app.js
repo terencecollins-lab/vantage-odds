@@ -8,6 +8,7 @@ const state = {
   search: '',
   marketType: 'All',
   sportsbook: 'All',
+  statType: 'All',
   league: LEAGUES[0].id,
   sort: 'edge',
   watchlistOnly: false,
@@ -25,6 +26,7 @@ const el = {
   sort: document.getElementById('sort-select'),
   leagueSelect: document.getElementById('league-select'),
   sportsbookSelect: document.getElementById('sportsbook-select'),
+  statTypeSelect: document.getElementById('stat-type-select'),
   search: document.getElementById('search-input'),
   watchlistToggle: document.getElementById('watchlist-toggle'),
   watchlistCount: document.getElementById('watchlist-count'),
@@ -103,10 +105,19 @@ function getAvailableSportsbooks() {
   return [...labels].sort();
 }
 
+function getAvailableStatTypes() {
+  const labels = new Set();
+  state.items.forEach((item) => {
+    if (item.marketType === 'Player Prop' && item.statLabel) labels.add(item.statLabel);
+  });
+  return [...labels].sort();
+}
+
 function getFilteredItems() {
   let items = state.items.filter((item) => {
     if (state.marketType !== 'All' && item.marketType !== state.marketType) return false;
     if (state.sportsbook !== 'All' && !item.bookmakers.some((b) => b.label === state.sportsbook)) return false;
+    if (state.statType !== 'All' && item.statLabel !== state.statType) return false;
     if (state.watchlistOnly && !state.watchlist.has(item.id)) return false;
     if (state.search && !item.name.toLowerCase().includes(state.search.toLowerCase())) return false;
     return true;
@@ -173,6 +184,21 @@ function renderSportsbookSelect() {
     el.sportsbookSelect.dataset.bound = 'true';
     el.sportsbookSelect.addEventListener('change', () => {
       state.sportsbook = el.sportsbookSelect.value;
+      renderGrid();
+    });
+  }
+}
+
+function renderStatTypeSelect() {
+  const statTypes = getAvailableStatTypes();
+  if (state.statType !== 'All' && !statTypes.includes(state.statType)) state.statType = 'All';
+  const options = ['All', ...statTypes];
+  el.statTypeSelect.innerHTML = options.map((s) => `<option value="${s}">${s === 'All' ? 'All stat types' : s}</option>`).join('');
+  el.statTypeSelect.value = state.statType;
+  if (!el.statTypeSelect.dataset.bound) {
+    el.statTypeSelect.dataset.bound = 'true';
+    el.statTypeSelect.addEventListener('change', () => {
+      state.statType = el.statTypeSelect.value;
       renderGrid();
     });
   }
@@ -247,7 +273,7 @@ function openModal(id) {
     </table>`
         : '<p class="form-note">No per-bookmaker breakdown at this API tier — showing the consensus line only.</p>'
     }
-    ${item.playerID ? '<div id="recent-form" class="recent-form"><h3>Recent form</h3><p class="form-note">Loading…</p></div>' : ''}
+    ${item.statID ? '<div id="recent-form" class="recent-form"><h3>Recent form</h3><p class="form-note">Loading…</p></div>' : ''}
     <div class="modal-actions">
       <button class="btn-secondary" id="modal-star">${isWatched ? '★ Remove from watchlist' : '☆ Add to watchlist'}</button>
       <button class="btn-primary" id="modal-close-2">Close</button>
@@ -260,20 +286,29 @@ function openModal(id) {
     toggleWatchlist(item.id);
     openModal(item.id);
   });
-  if (item.playerID) renderRecentForm(item);
+  if (item.statID) renderRecentForm(item);
 }
 
-function isHit(statValue, line, side) {
+// Unified hit test: player props and game totals compare a stat value
+// against a line; team_win/team_margin have their own pass/fail shape.
+function isHit(item, statValue) {
+  if (item.statID === 'team_win') return statValue > 0.5;
+  const line = item.line == null ? null : Number(item.line);
+  if (item.statID === 'team_margin') {
+    if (line == null) return null;
+    const margin = statValue + line;
+    return margin === 0 ? null : margin > 0;
+  }
   if (line == null) return null;
-  return side === 'under' ? statValue < line : statValue > line;
+  return item.side === 'under' ? statValue < line : statValue > line;
 }
 
-function formGuideDots(games, line, side, cap = 20) {
+function formGuideDots(games, item, cap = 20) {
   if (!games.length) return '<span class="form-empty">No recent games found</span>';
   const dots = games
     .slice(0, cap)
     .map((g) => {
-      const hit = isHit(g.statValue, line, side);
+      const hit = isHit(item, g.statValue);
       const cls = hit == null ? '' : hit ? 'hit' : 'miss';
       const title = `vs ${g.opponentName}: ${g.statValue}`;
       return `<span class="form-dot ${cls}" title="${title}"></span>`;
@@ -283,19 +318,27 @@ function formGuideDots(games, line, side, cap = 20) {
   return dots + more;
 }
 
-function hitRateLabel(games, line, side) {
+function hitRateLabel(games, item) {
   if (!games.length) return '—';
-  const hits = games.filter((g) => isHit(g.statValue, line, side)).length;
+  const hits = games.filter((g) => isHit(item, g.statValue)).length;
   return `${hits}/${games.length}`;
 }
 
-function coverageNote(coverage, gamesPlayed) {
+function recentFormCaption(item) {
+  if (item.statID === 'team_win') return 'Dots show most recent first. Green = won that game.';
+  if (item.statID === 'team_margin') return `Dots show most recent first. Green = covered this spread (${item.line ?? ''}).`;
+  const sideWord = item.side === 'under' ? 'under' : 'over';
+  return `Dots show most recent first. Green = would have hit ${sideWord} ${item.line ?? ''}.`;
+}
+
+function coverageNote(coverage, gamesPlayed, item) {
   if (!coverage?.earliestAvailable) return 'No historical events were returned to scan.';
   const earliest = new Date(coverage.earliestAvailable);
   const years = (Date.now() - earliest.getTime()) / (1000 * 60 * 60 * 24 * 365.25);
   const dateLabel = earliest.toLocaleDateString(undefined, { month: 'short', year: 'numeric' });
   const seasonCaveat = years < 4.5 ? ` SportsGameOdds' data for this league only goes back this far — a full 5 seasons isn't available.` : '';
-  return `Scanned all ${coverage.eventsScanned} finalized games back to ${dateLabel} (${gamesPlayed} played by this player).${seasonCaveat}`;
+  const subject = item.playerID ? 'played by this player' : 'played by this team';
+  return `Scanned all ${coverage.eventsScanned} finalized games back to ${dateLabel} (${gamesPlayed} ${subject}).${seasonCaveat}`;
 }
 
 async function renderRecentForm(item) {
@@ -314,13 +357,13 @@ async function renderRecentForm(item) {
     const last5H2H = h2h.slice(0, 5);
     container.innerHTML = `
       <h3>Recent form</h3>
-      <div class="form-row"><span class="form-label">Last 5</span><span class="form-dots">${formGuideDots(last5, item.line, item.side)}</span><span class="form-rate">${hitRateLabel(last5, item.line, item.side)}</span></div>
-      <div class="form-row"><span class="form-label">Last 10</span><span class="form-dots">${formGuideDots(last10, item.line, item.side)}</span><span class="form-rate">${hitRateLabel(last10, item.line, item.side)}</span></div>
-      <div class="form-row"><span class="form-label">All seasons</span><span class="form-dots">${formGuideDots(games, item.line, item.side)}</span><span class="form-rate">${hitRateLabel(games, item.line, item.side)}</span></div>
-      <div class="form-row"><span class="form-label">Last 5 H2H</span><span class="form-dots">${formGuideDots(last5H2H, item.line, item.side)}</span><span class="form-rate">${hitRateLabel(last5H2H, item.line, item.side)}</span></div>
-      <div class="form-row"><span class="form-label">All-time H2H</span><span class="form-dots">${formGuideDots(h2h, item.line, item.side)}</span><span class="form-rate">${hitRateLabel(h2h, item.line, item.side)}</span></div>
-      <p class="form-note">Dots show most recent first. Green = would have hit ${item.side === 'under' ? 'under' : 'over'} ${item.line ?? ''}.</p>
-      <p class="form-note">${coverageNote(coverage, games.length)}</p>
+      <div class="form-row"><span class="form-label">Last 5</span><span class="form-dots">${formGuideDots(last5, item)}</span><span class="form-rate">${hitRateLabel(last5, item)}</span></div>
+      <div class="form-row"><span class="form-label">Last 10</span><span class="form-dots">${formGuideDots(last10, item)}</span><span class="form-rate">${hitRateLabel(last10, item)}</span></div>
+      <div class="form-row"><span class="form-label">All seasons</span><span class="form-dots">${formGuideDots(games, item)}</span><span class="form-rate">${hitRateLabel(games, item)}</span></div>
+      <div class="form-row"><span class="form-label">Last 5 H2H</span><span class="form-dots">${formGuideDots(last5H2H, item)}</span><span class="form-rate">${hitRateLabel(last5H2H, item)}</span></div>
+      <div class="form-row"><span class="form-label">All-time H2H</span><span class="form-dots">${formGuideDots(h2h, item)}</span><span class="form-rate">${hitRateLabel(h2h, item)}</span></div>
+      <p class="form-note">${recentFormCaption(item)}</p>
+      <p class="form-note">${coverageNote(coverage, games.length, item)}</p>
     `;
   } catch (err) {
     container.innerHTML = `<p class="form-note">Recent form unavailable (${err.message}).</p>`;
@@ -337,6 +380,7 @@ function render() {
   renderChips();
   renderLeagueSelect();
   renderSportsbookSelect();
+  renderStatTypeSelect();
   renderGrid();
   el.watchlistCount.textContent = state.watchlist.size;
   el.watchlistToggle.classList.toggle('active', state.watchlistOnly);

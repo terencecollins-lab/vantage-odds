@@ -27,7 +27,8 @@ export async function fetchLiveItems(leagueID) {
 }
 
 export async function fetchGameLog({ league, teamID, playerID, statID, opponentTeamID }) {
-  const params = new URLSearchParams({ league, teamID, playerID, statID });
+  const params = new URLSearchParams({ league, teamID, statID });
+  if (playerID) params.set('playerID', playerID);
   if (opponentTeamID) params.set('opponentTeamID', opponentTeamID);
   const res = await fetch(`/api/game-log?${params.toString()}`);
   const json = await res.json();

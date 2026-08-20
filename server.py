@@ -6,6 +6,7 @@ lives only here, never reaching the browser or any client app.
 
 import json
 import os
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -169,6 +170,26 @@ def compute_no_vig_prob(odd, event_odds, best_price, best_book):
     return round((p_side / (p_side + p_opp)) * 1000) / 10
 
 
+TEAM_STAT_LABELS = {
+    "team_win": "Moneyline (W/L)",
+    "team_margin": "Against the Spread",
+    "game_total": "Game Total",
+}
+
+
+def humanize_stat_id(stat_id):
+    """'passing_yards' -> 'Passing Yards', 'fieldGoals_made' -> 'Field Goals Made'."""
+    if stat_id in TEAM_STAT_LABELS:
+        return TEAM_STAT_LABELS[stat_id]
+    if not stat_id:
+        return None
+    words = []
+    for part in stat_id.split("_"):
+        subwords = re.findall(r"[A-Z]?[a-z0-9]+|[A-Z]+(?=[A-Z]|$)", part)
+        words.extend(subwords or [part])
+    return " ".join(w.capitalize() for w in words)
+
+
 def team_short_name(team_obj):
     if not team_obj:
         return "Unknown"
@@ -245,16 +266,28 @@ def build_markets(events):
             else:
                 side_label = home if stat_entity == "home" else away
 
-            line = f" {odd['bookOverUnder']}" if odd.get("bookOverUnder") else ""
+            # Spread's line lives under bookSpread, not bookOverUnder.
+            raw_line = odd.get("bookOverUnder") or odd.get("bookSpread")
+            line_suffix = f" {raw_line}" if raw_line else ""
+
             if is_player_prop:
                 player = players.get(stat_entity, {})
-                name = f"{odd.get('marketName', market_type)} {side_label}{line}"
-                player_team_id = player.get("teamID")
-                opponent_team_id = away_team_id if player_team_id == home_team_id else home_team_id
+                name = f"{odd.get('marketName', market_type)} {side_label}{line_suffix}"
+                stat_team_id = player.get("teamID")
+                opponent_team_id = away_team_id if stat_team_id == home_team_id else home_team_id
+                stat_id = odd.get("statID")
+            elif market_type == "Total":
+                # No single team owns a game total -- anchor its recent-form
+                # history to the home team's own scoring across their games.
+                name = f"{matchup} — Total {side_label}{line_suffix}"
+                stat_team_id = home_team_id
+                opponent_team_id = away_team_id
+                stat_id = "game_total"
             else:
-                name = f"{matchup} — Total {side_label}{line}" if market_type == "Total" else f"{matchup} — {market_type} ({side_label})"
-                player_team_id = None
-                opponent_team_id = None
+                name = f"{matchup} — {market_type} ({side_label}{line_suffix})"
+                stat_team_id = home_team_id if stat_entity == "home" else away_team_id
+                opponent_team_id = away_team_id if stat_entity == "home" else home_team_id
+                stat_id = "team_win" if bet_type == "ml" else "team_margin"
 
             items.append({
                 "id": f"{event['eventID']}-{odd_id}",
@@ -272,14 +305,18 @@ def build_markets(events):
                 "edgePct": edge_pct,
                 "noVigProb": no_vig_prob,
                 "isOutlier": edge_pct is not None and edge_pct >= 2,
-                "statID": odd.get("statID") if is_player_prop else None,
+                "statID": stat_id,
+                "statLabel": humanize_stat_id(stat_id),
                 "playerID": stat_entity if is_player_prop else None,
-                "playerTeamID": player_team_id,
+                "playerTeamID": stat_team_id,
                 "opponentTeamID": opponent_team_id,
-                "line": odd.get("bookOverUnder"),
+                "line": raw_line,
                 "side": odd.get("sideID"),
             })
     return items
+
+
+TEAM_STAT_IDS = {"team_win", "team_margin", "game_total"}
 
 
 def build_game_log(events, player_id, stat_id, team_id, opponent_team_id):
@@ -293,12 +330,30 @@ def build_game_log(events, player_id, stat_id, team_id, opponent_team_id):
             continue
         results = event.get("results") or {}
         game_results = results.get("game") or {}
-        player_line = game_results.get(player_id)
-        if not player_line or stat_id not in player_line:
-            continue
         teams = event.get("teams") or {}
         home_id = (teams.get("home") or {}).get("teamID")
         is_home = home_id == team_id
+
+        if player_id:
+            player_line = game_results.get(player_id)
+            if not player_line or stat_id not in player_line:
+                continue
+            stat_value = player_line[stat_id]
+        elif stat_id in TEAM_STAT_IDS:
+            home_pts = (game_results.get("home") or {}).get("points")
+            away_pts = (game_results.get("away") or {}).get("points")
+            if home_pts is None or away_pts is None:
+                continue
+            own_pts, opp_pts = (home_pts, away_pts) if is_home else (away_pts, home_pts)
+            if stat_id == "team_win":
+                stat_value = 1 if own_pts > opp_pts else 0
+            elif stat_id == "team_margin":
+                stat_value = own_pts - opp_pts
+            else:  # game_total
+                stat_value = home_pts + away_pts
+        else:
+            continue
+
         opp_team = teams.get("away") if is_home else teams.get("home")
         games.append({
             "eventID": event["eventID"],
@@ -306,7 +361,7 @@ def build_game_log(events, player_id, stat_id, team_id, opponent_team_id):
             "home": is_home,
             "opponentTeamID": (opp_team or {}).get("teamID"),
             "opponentName": team_short_name(opp_team),
-            "statValue": player_line[stat_id],
+            "statValue": stat_value,
         })
     games.sort(key=lambda g: g["date"] or "", reverse=True)
     h2h = [g for g in games if opponent_team_id and g["opponentTeamID"] == opponent_team_id]
@@ -366,8 +421,11 @@ class Handler(BaseHTTPRequestHandler):
         stat_id = one("statID")
         opponent_team_id = one("opponentTeamID")
 
-        if not all([league_id, team_id, player_id, stat_id]):
-            self.send_json(400, {"success": False, "error": "league, teamID, playerID, and statID are required"})
+        if not all([league_id, team_id, stat_id]):
+            self.send_json(400, {"success": False, "error": "league, teamID, and statID are required"})
+            return
+        if not player_id and stat_id not in TEAM_STAT_IDS:
+            self.send_json(400, {"success": False, "error": f"statID '{stat_id}' requires playerID"})
             return
 
         try:
