@@ -33,42 +33,59 @@
       </div>
     </header>
 
+    <nav class="view-tabs">
+      <button class="view-tab active" id="view-tab-markets" data-view="markets">Markets</button>
+      <button class="view-tab" id="view-tab-mlb" data-view="mlb">MLB Matchups</button>
+    </nav>
+
     <p id="status-banner" class="status-banner" hidden></p>
 
-    <section class="stats-row" id="stats-row"></section>
+    <div id="markets-view">
+      <section class="stats-row" id="stats-row"></section>
 
-    <section class="controls-row">
-      <div class="category-chips" id="category-chips"></div>
-      <div class="controls-right">
-        <div class="sort-wrap">
-          <label for="league-select">League</label>
-          <select id="league-select"></select>
+      <section class="controls-row">
+        <div class="category-chips" id="category-chips"></div>
+        <div class="controls-right">
+          <div class="sort-wrap">
+            <label for="league-select">League</label>
+            <select id="league-select"></select>
+          </div>
+          <div class="sort-wrap">
+            <label for="sportsbook-select">Sportsbook</label>
+            <select id="sportsbook-select"></select>
+          </div>
+          <div class="sort-wrap">
+            <label for="stat-type-select">Stat</label>
+            <select id="stat-type-select"></select>
+          </div>
+          <div class="sort-wrap">
+            <label for="sort-select">Sort</label>
+            <select id="sort-select">
+              <option value="edge">Best edge vs. fair</option>
+              <option value="soonest">Starting soonest</option>
+            </select>
+          </div>
         </div>
-        <div class="sort-wrap">
-          <label for="sportsbook-select">Sportsbook</label>
-          <select id="sportsbook-select"></select>
-        </div>
-        <div class="sort-wrap">
-          <label for="stat-type-select">Stat</label>
-          <select id="stat-type-select"></select>
-        </div>
-        <div class="sort-wrap">
-          <label for="sort-select">Sort</label>
-          <select id="sort-select">
-            <option value="edge">Best edge vs. fair</option>
-            <option value="soonest">Starting soonest</option>
-          </select>
-        </div>
-      </div>
-    </section>
+      </section>
 
-    <main>
-      <div class="card-grid" id="card-grid"></div>
-      <p class="empty-state" id="empty-state" hidden>No live markets match your filters.</p>
-    </main>
+      <main>
+        <div class="card-grid" id="card-grid"></div>
+        <p class="empty-state" id="empty-state" hidden>No live markets match your filters.</p>
+      </main>
+    </div>
+
+    <div id="mlb-matchups-view" hidden>
+      <section class="controls-row">
+        <div class="sort-wrap">
+          <label for="mlb-game-select">Game</label>
+          <select id="mlb-game-select"></select>
+        </div>
+      </section>
+      <div id="mlb-matchup-content"></div>
+    </div>
 
     <footer class="app-footer">
-      Vantage displays real odds data licensed from <a href="https://sportsgameodds.com" target="_blank" rel="noopener">SportsGameOdds</a>. It does not accept wagers or process payments — it only compares publicly posted sportsbook lines. "Best" and "fair" odds are informational estimates, not guarantees. 18+ only where applicable; check local regulations before wagering with any linked sportsbook.
+      Vantage displays real odds data licensed from <a href="https://sportsgameodds.com" target="_blank" rel="noopener">SportsGameOdds</a>, and batter/pitcher matchup history from MLB's public Stats API. It does not accept wagers or process payments — it only compares publicly posted sportsbook lines. "Best" and "fair" odds are informational estimates, not guarantees. 18+ only where applicable; check local regulations before wagering with any linked sportsbook.
     </footer>
   </div>
 

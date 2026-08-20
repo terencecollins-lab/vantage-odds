@@ -1,5 +1,6 @@
 import { LEAGUES, MARKET_TYPES, fetchLiveItems, fetchGameLog, formatAmerican } from './odds.js';
 import { SAMPLE_ITEMS } from './sample-odds.js';
+import { fetchMlbGames, fetchMlbMatchup } from './mlb.js';
 
 const WATCHLIST_KEY = 'vantage.watchlist';
 const THEME_KEY = 'vantage.theme';
@@ -16,6 +17,12 @@ const state = {
   items: [],
   usingFallback: false,
   loading: true,
+  view: 'markets',
+  mlbGames: [],
+  mlbSelectedGameKey: null,
+  mlbLoading: false,
+  mlbError: null,
+  mlbData: null,
 };
 
 const el = {
@@ -34,6 +41,12 @@ const el = {
   modalBackdrop: document.getElementById('modal-backdrop'),
   modalContent: document.getElementById('modal-content'),
   statusBanner: document.getElementById('status-banner'),
+  viewTabMarkets: document.getElementById('view-tab-markets'),
+  viewTabMlb: document.getElementById('view-tab-mlb'),
+  marketsView: document.getElementById('markets-view'),
+  mlbView: document.getElementById('mlb-matchups-view'),
+  mlbGameSelect: document.getElementById('mlb-game-select'),
+  mlbMatchupContent: document.getElementById('mlb-matchup-content'),
 };
 
 function starIcon(active) {
@@ -414,6 +427,107 @@ el.themeToggle.addEventListener('click', () => {
   applyTheme(current === 'dark' ? 'light' : 'dark');
 });
 applyTheme(localStorage.getItem(THEME_KEY) || 'light');
+
+function gameKey(game) {
+  return `${game.matchup}|${game.startsAt}`;
+}
+
+function formatGameLabel(game) {
+  const d = new Date(game.startsAt);
+  const dateLabel = d.toLocaleString(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  return `${game.matchup} — ${dateLabel}`;
+}
+
+async function loadMlbGames() {
+  el.mlbGameSelect.innerHTML = '<option>Loading games…</option>';
+  try {
+    state.mlbGames = await fetchMlbGames();
+    if (state.mlbGames.length === 0) {
+      el.mlbGameSelect.innerHTML = '<option>No upcoming MLB games found</option>';
+      el.mlbMatchupContent.innerHTML = '';
+      return;
+    }
+    el.mlbGameSelect.innerHTML = state.mlbGames.map((g) => `<option value="${gameKey(g)}">${formatGameLabel(g)}</option>`).join('');
+    state.mlbSelectedGameKey = gameKey(state.mlbGames[0]);
+    el.mlbGameSelect.value = state.mlbSelectedGameKey;
+    await loadMlbMatchup();
+  } catch (err) {
+    el.mlbGameSelect.innerHTML = '<option>Error loading games</option>';
+    el.mlbMatchupContent.innerHTML = `<p class="form-note">Could not load MLB games (${err.message}).</p>`;
+  }
+}
+
+function hitterRow(b) {
+  const s = b.stats;
+  const fmt = (v) => (v != null ? v.toFixed(3).replace(/^0/, '') : '—');
+  return `<tr>
+    <td>${b.fullName}</td>
+    <td>${b.position}</td>
+    <td>${s.plateAppearances}</td>
+    <td>${s.atBats}</td>
+    <td>${s.hits}</td>
+    <td>${s.homeRuns}</td>
+    <td>${s.walks}</td>
+    <td>${s.strikeouts}</td>
+    <td>${fmt(s.avg)}</td>
+    <td>${fmt(s.obp)}</td>
+    <td>${fmt(s.slg)}</td>
+    <td>${fmt(s.ops)}</td>
+  </tr>`;
+}
+
+function pitcherCard(title, sideData) {
+  if (!sideData) {
+    return `<div class="mlb-pitcher-card"><h3>${title}</h3><p class="mlb-subtitle">Probable pitcher not yet announced.</p></div>`;
+  }
+  if (sideData.batters.length === 0) {
+    return `<div class="mlb-pitcher-card"><h3>${sideData.pitcher.fullName}</h3><p class="mlb-subtitle">No career at-bats found against this lineup.</p></div>`;
+  }
+  return `<div class="mlb-pitcher-card">
+    <h3>${sideData.pitcher.fullName}</h3>
+    <p class="mlb-subtitle">${title}</p>
+    <div class="mlb-table-wrap">
+      <table class="mlb-table">
+        <thead><tr><th>Batter</th><th>Pos</th><th>PA</th><th>AB</th><th>H</th><th>HR</th><th>BB</th><th>K</th><th>AVG</th><th>OBP</th><th>SLG</th><th>OPS</th></tr></thead>
+        <tbody>${sideData.batters.map(hitterRow).join('')}</tbody>
+      </table>
+    </div>
+  </div>`;
+}
+
+async function loadMlbMatchup() {
+  const game = state.mlbGames.find((g) => gameKey(g) === state.mlbSelectedGameKey);
+  if (!game) return;
+  el.mlbMatchupContent.innerHTML = '<p class="form-note">Loading matchup data…</p>';
+  try {
+    const [awayName, homeName] = game.matchup.split(' @ ');
+    const data = await fetchMlbMatchup(game);
+    state.mlbData = data;
+    el.mlbMatchupContent.innerHTML =
+      pitcherCard(`vs. ${awayName} hitters`, data.homePitcherVsAwayHitters) +
+      pitcherCard(`vs. ${homeName} hitters`, data.awayPitcherVsHomeHitters);
+  } catch (err) {
+    el.mlbMatchupContent.innerHTML = `<p class="form-note">Could not load matchup data (${err.message}).</p>`;
+  }
+}
+
+function setView(view) {
+  state.view = view;
+  el.viewTabMarkets.classList.toggle('active', view === 'markets');
+  el.viewTabMlb.classList.toggle('active', view === 'mlb');
+  el.marketsView.hidden = view !== 'markets';
+  el.mlbView.hidden = view !== 'mlb';
+  if (view === 'mlb' && state.mlbGames.length === 0) {
+    loadMlbGames();
+  }
+}
+
+el.viewTabMarkets.addEventListener('click', () => setView('markets'));
+el.viewTabMlb.addEventListener('click', () => setView('mlb'));
+el.mlbGameSelect.addEventListener('change', () => {
+  state.mlbSelectedGameKey = el.mlbGameSelect.value;
+  loadMlbMatchup();
+});
 
 render();
 loadItems();

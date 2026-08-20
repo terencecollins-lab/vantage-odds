@@ -52,6 +52,46 @@ body {
   padding: 6px 0 20px;
 }
 
+.view-tabs { display: flex; gap: 4px; margin-bottom: 18px; border-bottom: 1px solid var(--border); }
+.view-tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-muted);
+  font-weight: 700;
+  font-size: 14px;
+  font-family: inherit;
+  padding: 10px 4px;
+  margin-right: 20px;
+  cursor: pointer;
+}
+.view-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+.mlb-pitcher-card {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 18px;
+  margin-bottom: 20px;
+  box-shadow: var(--shadow);
+}
+.mlb-pitcher-card h3 { margin: 0 0 4px; font-size: 16px; }
+.mlb-pitcher-card .mlb-subtitle { font-size: 13px; color: var(--text-muted); margin-bottom: 14px; }
+.mlb-table-wrap { overflow-x: auto; }
+.mlb-table { width: 100%; border-collapse: collapse; font-size: 13px; white-space: nowrap; }
+.mlb-table th {
+  text-align: right;
+  color: var(--text-muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.mlb-table th:first-child, .mlb-table td:first-child { text-align: left; }
+.mlb-table td { padding: 8px 10px; border-bottom: 1px solid var(--border); text-align: right; font-family: 'JetBrains Mono', monospace; }
+.mlb-table td:nth-child(2) { font-family: inherit; color: var(--text-muted); }
+
 .brand { display: flex; align-items: center; gap: 10px; }
 .brand-mark {
   width: 34px; height: 34px;

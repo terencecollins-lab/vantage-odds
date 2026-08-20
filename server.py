@@ -4,6 +4,7 @@
 lives only here, never reaching the browser or any client app.
 """
 
+import concurrent.futures
 import json
 import os
 import re
@@ -19,6 +20,46 @@ UPSTREAM_BASE = "https://api.sportsgameodds.com/v2"
 MARKETS_CACHE_TTL = 20
 GAME_LOG_CACHE_TTL = 24 * 60 * 60  # finalized games don't change
 GAME_LOG_MAX_PAGES = 12  # 12 * 50 = 600 events, well beyond ~2.5 seasons for any league
+
+MLB_STATS_BASE = "https://statsapi.mlb.com/api/v1"
+MLB_SCHEDULE_CACHE_TTL = 2 * 60 * 60  # probable pitchers can be announced/updated
+MLB_ROSTER_CACHE_TTL = 24 * 60 * 60
+MLB_VSPLAYER_CACHE_TTL = 24 * 60 * 60  # career history barely moves day to day
+
+# SportsGameOdds teamID -> MLB Stats API's own numeric team id (statsapi.mlb.com
+# has no relation to SportsGameOdds' naming, so this has to be hand-mapped).
+MLB_TEAM_STATSAPI_ID = {
+    "ARIZONA_DIAMONDBACKS_MLB": 109,
+    "ATLANTA_BRAVES_MLB": 144,
+    "BALTIMORE_ORIOLES_MLB": 110,
+    "BOSTON_RED_SOX_MLB": 111,
+    "CHICAGO_CUBS_MLB": 112,
+    "CHICAGO_WHITE_SOX_MLB": 145,
+    "CINCINNATI_REDS_MLB": 113,
+    "CLEVELAND_GUARDIANS_MLB": 114,
+    "COLORADO_ROCKIES_MLB": 115,
+    "DETROIT_TIGERS_MLB": 116,
+    "HOUSTON_ASTROS_MLB": 117,
+    "KANSAS_CITY_ROYALS_MLB": 118,
+    "LOS_ANGELES_ANGELS_MLB": 108,
+    "LOS_ANGELES_DODGERS_MLB": 119,
+    "MIAMI_MARLINS_MLB": 146,
+    "MILWAUKEE_BREWERS_MLB": 158,
+    "MINNESOTA_TWINS_MLB": 142,
+    "NEW_YORK_METS_MLB": 121,
+    "NEW_YORK_YANKEES_MLB": 147,
+    "OAKLAND_ATHLETICS_MLB": 133,
+    "PHILADELPHIA_PHILLIES_MLB": 143,
+    "PITTSBURGH_PIRATES_MLB": 134,
+    "SAN_DIEGO_PADRES_MLB": 135,
+    "SAN_FRANCISCO_GIANTS_MLB": 137,
+    "SEATTLE_MARINERS_MLB": 136,
+    "STLOUIS_CARDINALS_MLB": 138,
+    "TAMPA_BAY_RAYS_MLB": 139,
+    "TEXAS_RANGERS_MLB": 140,
+    "TORONTO_BLUE_JAYS_MLB": 141,
+    "WASHINGTON_NATIONALS_MLB": 120,
+}
 
 _cache = {}  # cache namespace + query string -> (expires_at, parsed_json)
 
@@ -372,6 +413,124 @@ def build_game_log(events, player_id, stat_id, team_id, opponent_team_id):
     }
 
 
+def _fetch_mlb_json(url, cache_ns, ttl):
+    """Generic fetcher for statsapi.mlb.com (MLB's own public Stats API --
+    unauthenticated, no key required, same data MLB.com's own stat pages use)."""
+    cache_key = f"{cache_ns}:{url}"
+    cached = _cache.get(cache_key)
+    if cached and cached[0] > time.time():
+        return cached[1]
+
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (compatible; VantageDemo/1.0)"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            body = resp.read()
+    except urllib.error.HTTPError as e:
+        raise UpstreamError(e.code, e.read().decode("utf-8", "replace"))
+    except urllib.error.URLError as e:
+        raise UpstreamError(502, f"Could not reach MLB Stats API: {e.reason}")
+
+    try:
+        parsed = json.loads(body)
+    except json.JSONDecodeError:
+        raise UpstreamError(502, "MLB Stats API returned a non-JSON response")
+
+    _cache[cache_key] = (time.time() + ttl, parsed)
+    return parsed
+
+
+def get_probable_pitchers(home_statsapi_id, away_statsapi_id, game_date):
+    """Looks up the day's schedule and finds this specific matchup's
+    probable starters -- returns {"home": {...} or None, "away": {...} or None}."""
+    url = f"{MLB_STATS_BASE}/schedule?sportId=1&date={game_date}&hydrate=probablePitcher"
+    data = _fetch_mlb_json(url, cache_ns="mlb_schedule", ttl=MLB_SCHEDULE_CACHE_TTL)
+    for date_entry in data.get("dates", []):
+        for game in date_entry.get("games", []):
+            teams = game.get("teams", {})
+            home_id = (teams.get("home", {}).get("team") or {}).get("id")
+            away_id = (teams.get("away", {}).get("team") or {}).get("id")
+            if home_id == home_statsapi_id and away_id == away_statsapi_id:
+                result = {}
+                for side in ("home", "away"):
+                    pitcher = teams.get(side, {}).get("probablePitcher")
+                    result[side] = {"id": pitcher["id"], "fullName": pitcher.get("fullName")} if pitcher else None
+                return result
+    return {"home": None, "away": None}
+
+
+def get_active_hitters(team_statsapi_id):
+    """Active roster for a team, excluding pitchers -- these are the
+    plausible lineup candidates we'll pull batter-vs-pitcher splits for."""
+    url = f"{MLB_STATS_BASE}/teams/{team_statsapi_id}/roster?rosterType=active"
+    data = _fetch_mlb_json(url, cache_ns="mlb_roster", ttl=MLB_ROSTER_CACHE_TTL)
+    hitters = []
+    for entry in data.get("roster", []):
+        position = (entry.get("position") or {}).get("abbreviation")
+        if position == "P":
+            continue
+        person = entry.get("person") or {}
+        hitters.append({"id": person.get("id"), "fullName": person.get("fullName"), "position": position})
+    return hitters
+
+
+def get_batter_vs_pitcher(batter_id, pitcher_id):
+    """Aggregates a batter's career plate-appearance-level history against one
+    specific pitcher (MLB's own vsPlayer split) into lifetime counting stats --
+    OPS/AVG/SLG aren't valid to average across seasons, so we sum the raw
+    counting stats and recompute the rate stats from those totals."""
+    url = (
+        f"{MLB_STATS_BASE}/people/{batter_id}/stats"
+        f"?stats=vsPlayer&opposingPlayerId={pitcher_id}&group=hitting"
+    )
+    data = _fetch_mlb_json(url, cache_ns="mlb_vsplayer", ttl=MLB_VSPLAYER_CACHE_TTL)
+    splits = (data.get("stats") or [{}])[0].get("splits") or []
+    if not splits:
+        return None
+
+    totals = {"atBats": 0, "hits": 0, "homeRuns": 0, "baseOnBalls": 0, "strikeOuts": 0, "totalBases": 0, "hitByPitch": 0, "sacFlies": 0, "plateAppearances": 0}
+    for split in splits:
+        stat = split.get("stat") or {}
+        for key in totals:
+            totals[key] += stat.get(key) or 0
+
+    ab, h, bb, hbp, sf, tb, pa = (totals[k] for k in ("atBats", "hits", "baseOnBalls", "hitByPitch", "sacFlies", "totalBases", "plateAppearances"))
+    avg = round(h / ab, 3) if ab else None
+    obp_denom = ab + bb + hbp + sf
+    obp = round((h + bb + hbp) / obp_denom, 3) if obp_denom else None
+    slg = round(tb / ab, 3) if ab else None
+    ops = round(obp + slg, 3) if (obp is not None and slg is not None) else None
+
+    return {
+        "atBats": ab, "hits": h, "homeRuns": totals["homeRuns"], "walks": bb,
+        "strikeouts": totals["strikeOuts"], "plateAppearances": pa,
+        "avg": avg, "obp": obp, "slg": slg, "ops": ops,
+    }
+
+
+def build_mlb_matchup(home_team_id, away_team_id, game_date):
+    home_statsapi_id = MLB_TEAM_STATSAPI_ID.get(home_team_id)
+    away_statsapi_id = MLB_TEAM_STATSAPI_ID.get(away_team_id)
+    if not home_statsapi_id or not away_statsapi_id:
+        raise UpstreamError(400, "Unrecognized MLB team")
+
+    pitchers = get_probable_pitchers(home_statsapi_id, away_statsapi_id, game_date)
+
+    def side_matchups(pitcher, hitters):
+        if not pitcher:
+            return None
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(lambda b: (b, get_batter_vs_pitcher(b["id"], pitcher["id"])), hitters))
+        rows = [{**b, "stats": s} for b, s in results if s is not None]
+        rows.sort(key=lambda r: r["stats"]["atBats"], reverse=True)
+        return {"pitcher": pitcher, "batters": rows}
+
+    return {
+        # Home team's pitcher faces the away team's lineup, and vice versa.
+        "homePitcherVsAwayHitters": side_matchups(pitchers["home"], get_active_hitters(away_statsapi_id)),
+        "awayPitcherVsHomeHitters": side_matchups(pitchers["away"], get_active_hitters(home_statsapi_id)),
+    }
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         print(f"[vantage] {self.address_string()} - {fmt % args}")
@@ -382,6 +541,8 @@ class Handler(BaseHTTPRequestHandler):
             self.handle_markets(parsed)
         elif parsed.path == "/api/game-log":
             self.handle_game_log(parsed)
+        elif parsed.path == "/api/mlb-matchups":
+            self.handle_mlb_matchups(parsed)
         else:
             self.handle_static(parsed)
 
@@ -435,6 +596,26 @@ class Handler(BaseHTTPRequestHandler):
                 ttl=GAME_LOG_CACHE_TTL,
             )
             result = build_game_log(events, player_id, stat_id, team_id, opponent_team_id)
+            self.send_json(200, {"success": True, **result})
+        except UpstreamError as e:
+            self.send_json(e.status if e.status < 600 else 502, {"success": False, "error": e.message})
+
+    def handle_mlb_matchups(self, parsed):
+        qs = urllib.parse.parse_qs(parsed.query)
+
+        def one(key, default=None):
+            return (qs.get(key) or [default])[0]
+
+        home_team_id = one("homeTeamID")
+        away_team_id = one("awayTeamID")
+        game_date = one("gameDate")  # YYYY-MM-DD
+
+        if not all([home_team_id, away_team_id, game_date]):
+            self.send_json(400, {"success": False, "error": "homeTeamID, awayTeamID, and gameDate are required"})
+            return
+
+        try:
+            result = build_mlb_matchup(home_team_id, away_team_id, game_date)
             self.send_json(200, {"success": True, **result})
         except UpstreamError as e:
             self.send_json(e.status if e.status < 600 else 502, {"success": False, "error": e.message})

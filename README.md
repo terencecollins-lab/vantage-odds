@@ -1,17 +1,19 @@
 # Vantage
 
-A dashboard that compares real sportsbook odds across bookmakers for a chosen league (NFL/NBA/MLB/NHL), flags lines that pay better than the no-vig "fair" price as value edges, and shows a player prop's recent-form context (last 5, last 10, all available seasons, and head-to-head).
+A dashboard that compares real sportsbook odds across bookmakers for a chosen league (NFL/NBA/MLB/NHL), flags lines that pay better than the no-vig "fair" price as value edges, and shows recent-form context for both player props (last 5, last 10, all available seasons, head-to-head) and team markets (Moneyline win/loss, Spread cover rate, Total over/under history). A separate "MLB Matchups" tab shows real batter-vs-pitcher career history for each game's probable starters.
 
-Odds data comes from the [SportsGameOdds](https://sportsgameodds.com) API. Vantage does not accept wagers, hold funds, or process payments — it's a read-only comparison layer. Sportsbook links open the bookmaker's own site/app.
+Odds data comes from the [SportsGameOdds](https://sportsgameodds.com) API. Batter/pitcher matchup data comes from [MLB's own public Stats API](https://statsapi.mlb.com) (the same one MLB.com's stat pages use — unauthenticated, no key needed). Vantage does not accept wagers, hold funds, or process payments — it's a read-only comparison layer. Sportsbook links open the bookmaker's own site/app.
 
 ## Architecture
 
-- `server.py` — stdlib-only Python server. Serves the static frontend and exposes two endpoints, both backed by SportsGameOdds with the API key kept server-side (from `.env`, never sent to the browser):
-  - `/api/markets?league=NFL` — fetches + normalizes upcoming odds into card view-models (best price, fair odds, edge %, per-bookmaker rows). Cached 20s.
-  - `/api/game-log?league=...&teamID=...&playerID=...&statID=...&opponentTeamID=...` — paginates through every finalized game SportsGameOdds has for that team (the API caps each page at 50, so this walks the `cursor` until exhausted), extracts the player's stat line per game, and returns full history + head-to-head splits + a `coverage` block (earliest date scanned, games found). Cached 24h since finalized results don't change.
-- `odds.js` — thin fetch client for both endpoints; no parsing logic duplicated here.
+- `server.py` — stdlib-only Python server. Serves the static frontend and exposes:
+  - `/api/markets?league=NFL` — fetches + normalizes upcoming odds into card view-models (best price, fair odds, edge %, no-vig probability, per-bookmaker rows). Cached 20s.
+  - `/api/game-log?league=...&teamID=...&statID=...&opponentTeamID=...&playerID=` — paginates through every finalized game SportsGameOdds has for that team (the API caps each page at 50, so this walks the `cursor` until exhausted). With `playerID`, extracts that player's stat line per game; without it, `statID` must be one of `team_win`/`team_margin`/`game_total`, computed from the team's own scoring. Returns full history + head-to-head splits + a `coverage` block. Cached 24h since finalized results don't change.
+  - `/api/mlb-matchups?homeTeamID=...&awayTeamID=...&gameDate=YYYY-MM-DD` — looks up that game's probable starting pitchers via MLB's schedule endpoint, pulls each opposing team's active-roster hitters, and fetches each hitter's career at-bat history against that specific pitcher (MLB's `vsPlayer` split), aggregating the raw counting stats across seasons into one lifetime AVG/OBP/SLG/OPS line (rate stats aren't valid to average directly — only the underlying counts are). Fetches run in parallel via a thread pool since a full lineup is 10-15 independent calls. Cached: schedule/probable-pitcher lookups 2h, rosters 24h, matchup history 24h.
+  - Both external APIs are called with a real browser `User-Agent` — Cloudflare (in front of SportsGameOdds) and other bot-protection blocks the default Python/curl UA string outright.
+- `odds.js` / `mlb.js` — thin fetch clients; no parsing logic duplicated here.
 - `sample-odds.js` — static fallback data (clearly fake) shown only if the live feed errors out.
-- `app.js` / `index.html` / `style.css` — UI: league + market-type filters, sort, card grid, detail modal (bookmaker table + recent-form section), watchlist, theme toggle.
+- `app.js` / `index.html` / `style.css` — UI: a Markets/MLB Matchups tab toggle, league + market-type + sportsbook + stat-type filters, sort, card grid, detail modal (bookmaker table + no-vig + recent-form section), watchlist, theme toggle.
 
 ## Setup
 
