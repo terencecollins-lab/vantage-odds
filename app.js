@@ -7,6 +7,7 @@ const THEME_KEY = 'vantage.theme';
 const state = {
   search: '',
   marketType: 'All',
+  sportsbook: 'All',
   league: LEAGUES[0].id,
   sort: 'edge',
   watchlistOnly: false,
@@ -23,6 +24,7 @@ const el = {
   chips: document.getElementById('category-chips'),
   sort: document.getElementById('sort-select'),
   leagueSelect: document.getElementById('league-select'),
+  sportsbookSelect: document.getElementById('sportsbook-select'),
   search: document.getElementById('search-input'),
   watchlistToggle: document.getElementById('watchlist-toggle'),
   watchlistCount: document.getElementById('watchlist-count'),
@@ -95,9 +97,16 @@ function hideBanner() {
   el.statusBanner.hidden = true;
 }
 
+function getAvailableSportsbooks() {
+  const labels = new Set();
+  state.items.forEach((item) => item.bookmakers.forEach((b) => labels.add(b.label)));
+  return [...labels].sort();
+}
+
 function getFilteredItems() {
   let items = state.items.filter((item) => {
     if (state.marketType !== 'All' && item.marketType !== state.marketType) return false;
+    if (state.sportsbook !== 'All' && !item.bookmakers.some((b) => b.label === state.sportsbook)) return false;
     if (state.watchlistOnly && !state.watchlist.has(item.id)) return false;
     if (state.search && !item.name.toLowerCase().includes(state.search.toLowerCase())) return false;
     return true;
@@ -152,6 +161,21 @@ function renderLeagueSelect() {
     });
   }
   el.leagueSelect.value = state.league;
+}
+
+function renderSportsbookSelect() {
+  const books = getAvailableSportsbooks();
+  if (state.sportsbook !== 'All' && !books.includes(state.sportsbook)) state.sportsbook = 'All';
+  const options = ['All', ...books];
+  el.sportsbookSelect.innerHTML = options.map((b) => `<option value="${b}">${b === 'All' ? 'All sportsbooks' : b}</option>`).join('');
+  el.sportsbookSelect.value = state.sportsbook;
+  if (!el.sportsbookSelect.dataset.bound) {
+    el.sportsbookSelect.dataset.bound = 'true';
+    el.sportsbookSelect.addEventListener('change', () => {
+      state.sportsbook = el.sportsbookSelect.value;
+      renderGrid();
+    });
+  }
 }
 
 function renderCard(item) {
@@ -214,6 +238,7 @@ function openModal(id) {
       ${item.fairOdds ? `<span class="market-price">${formatAmerican(item.fairOdds)} fair</span>` : ''}
       ${item.edgePct != null ? `<span class="savings-pct">${item.edgePct >= 0 ? '+' : ''}${item.edgePct}% vs. fair odds</span>` : ''}
     </div>
+    ${item.noVigProb != null ? `<div class="novig-row">No-vig probability: <strong>${item.noVigProb}%</strong> <span class="form-note">(devigged from this line's two-sided odds)</span></div>` : ''}
     ${
       item.bookmakers.length
         ? `<table class="vendor-table">
@@ -311,6 +336,7 @@ function render() {
   renderStats();
   renderChips();
   renderLeagueSelect();
+  renderSportsbookSelect();
   renderGrid();
   el.watchlistCount.textContent = state.watchlist.size;
   el.watchlistToggle.classList.toggle('active', state.watchlistOnly);

@@ -133,6 +133,42 @@ def american_to_decimal(american):
     return 1 + n / 100 if n > 0 else 1 + 100 / abs(n)
 
 
+def american_to_implied_prob(american):
+    try:
+        n = int(american)
+    except (TypeError, ValueError):
+        return None
+    return 100 / (n + 100) if n > 0 else abs(n) / (abs(n) + 100)
+
+
+def compute_no_vig_prob(odd, event_odds, best_price, best_book):
+    """No-vig (de-vigged) probability for the side being shown, derived from
+    the SAME bookmaker's two-sided market where possible (falls back to the
+    blended consensus line if that book doesn't quote the opposing side) --
+    this is the classic "remove the juice" calculation, distinct from the
+    API's own blended `fairOdds`, which mixes many books together."""
+    opposing_id = odd.get("opposingOddID")
+    opposing = event_odds.get(opposing_id) if opposing_id else None
+    if not opposing:
+        return None
+
+    opposing_price = None
+    if best_book:
+        book_entry = (opposing.get("byBookmaker") or {}).get(best_book)
+        if book_entry and book_entry.get("available") and book_entry.get("odds"):
+            opposing_price = book_entry["odds"]
+    if opposing_price is None and opposing.get("bookOddsAvailable") and opposing.get("bookOdds"):
+        opposing_price = opposing["bookOdds"]
+    if opposing_price is None:
+        return None
+
+    p_side = american_to_implied_prob(best_price)
+    p_opp = american_to_implied_prob(opposing_price)
+    if p_side is None or p_opp is None or (p_side + p_opp) == 0:
+        return None
+    return round((p_side / (p_side + p_opp)) * 1000) / 10
+
+
 def team_short_name(team_obj):
     if not team_obj:
         return "Unknown"
@@ -152,7 +188,8 @@ def build_markets(events):
         home_team_id = (teams.get("home") or {}).get("teamID")
         away_team_id = (teams.get("away") or {}).get("teamID")
 
-        for odd_id, odd in (event.get("odds") or {}).items():
+        event_odds = event.get("odds") or {}
+        for odd_id, odd in event_odds.items():
             if odd.get("periodID") != "game":
                 continue
             bet_type = odd.get("betTypeID")
@@ -188,17 +225,20 @@ def build_markets(events):
                 best_price = best["american"]
                 best_vendor = best["label"]
                 best_deeplink = best["deeplink"]
+                best_book_key = best["book"]
             elif odd.get("bookOddsAvailable") and odd.get("bookOdds"):
                 # No per-book breakdown at this API tier (common for player props) --
                 # fall back to the single consensus line so the market is still shown.
                 best_price = odd["bookOdds"]
                 best_vendor = "Consensus"
                 best_deeplink = None
+                best_book_key = None
             else:
                 continue
 
             best_decimal = american_to_decimal(best_price)
             edge_pct = round(((best_decimal - fair_decimal) / fair_decimal) * 1000) / 10 if (fair_decimal and best_decimal) else None
+            no_vig_prob = compute_no_vig_prob(odd, event_odds, best_price, best_book_key)
 
             if bet_type == "ou":
                 side_label = "Over" if odd.get("sideID") == "over" else "Under"
@@ -230,6 +270,7 @@ def build_markets(events):
                 "fairOdds": odd.get("fairOdds") if odd.get("fairOddsAvailable") else None,
                 "openBookOdds": odd.get("openBookOdds"),
                 "edgePct": edge_pct,
+                "noVigProb": no_vig_prob,
                 "isOutlier": edge_pct is not None and edge_pct >= 2,
                 "statID": odd.get("statID") if is_player_prop else None,
                 "playerID": stat_entity if is_player_prop else None,

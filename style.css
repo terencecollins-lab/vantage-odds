@@ -152,7 +152,7 @@ body {
   flex-wrap: wrap;
 }
 
-.controls-right { display: flex; align-items: center; gap: 16px; }
+.controls-right { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
 
 .category-chips { display: flex; gap: 8px; flex-wrap: wrap; }
 .category-chip {
@@ -322,6 +322,10 @@ body {
 .form-dot.hit { background: var(--positive); }
 .form-dot.miss { background: var(--negative); }
 .form-rate { font-family: 'JetBrains Mono', monospace; font-size: 12.5px; font-weight: 700; width: 36px; text-align: right; flex-shrink: 0; }
+.novig-row { font-size: 13px; color: var(--text); margin-top: 6px; }
+.novig-row strong { font-family: 'JetBrains Mono', monospace; }
+.novig-row .form-note { display: inline; }
+
 .form-empty, .form-note, .form-more { font-size: 12px; color: var(--text-muted); }
 .form-more { align-self: center; }
 .form-note { margin: 10px 0 0; }
