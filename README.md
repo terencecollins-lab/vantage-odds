@@ -1,6 +1,6 @@
 # Vantage
 
-A dashboard that compares real sportsbook odds across bookmakers for a chosen league, flags lines that pay better than the no-vig "fair" price as value edges, and shows recent-form context for both player props (last 5, last 10, all available seasons, head-to-head) and team markets (Moneyline win/loss, Spread cover rate, Total over/under history). Cards show a "History since {date}" badge with the real earliest-data date for that league — not a marketing claim, an actual computed value. A separate "MLB Matchups" tab shows real batter-vs-pitcher career history for each game's probable starters, and a "Best No-Vig" tab ranks the best value edges across every supported league at once, auto-refreshing every 30s.
+A dashboard that compares real sportsbook odds across bookmakers for a chosen league, flags lines that pay better than the no-vig "fair" price as value edges, and shows recent-form context for both player props (last 5, last 10, all available seasons, head-to-head) and team markets (Moneyline win/loss, Spread cover rate, Total over/under history). Cards show a "History since {date}" badge with the real earliest-data date for that league — not a marketing claim, an actual computed value. A "MLB Matchups" tab shows real batter-vs-pitcher career history for each game's probable starters, a "Best No-Vig" tab ranks the best value edges across every supported league at once (auto-refreshing every 30s), and a "Golf" tab shows the live PGA Tour leaderboard with under-par highlighting, cross-referenced against 2021-2025 history for 7 recurring events.
 
 **Supported leagues** (41, grouped by sport — see `odds.js`'s `LEAGUE_GROUPS`): Football (NFL, College Football, CFL, USFL, XFL), Basketball (NBA, College Basketball, WNBA, NBA G League), Baseball (MLB, NPB, KBO, CPBL, MLB Minors/AAA, WBC, LBPRC, LIDOM, LMP, LVBP), Hockey (NHL, AHL, KHL, SHL), Soccer (Premier League, Champions League, Europa League, La Liga, Bundesliga, Serie A, Ligue 1, MLS, Brasileiro Série A, Liga MX, International Soccer), Handball (EHF European League, EHF European Cup, SEHA Liga, IHF Super Globe), Tennis (ATP, WTA), MMA (UFC). Golf (PGA, LIV) and SportsGameOdds' NON_SPORTS categories (Politics, TV, Movies, Music, Fun, Events, Weather, Markets) are deliberately excluded — those are outright/prop formats with no home/away pairing, which this app's "Team A @ Team B" card model can't represent without a different UI.
 
@@ -12,11 +12,13 @@ Odds data comes from the [SportsGameOdds](https://sportsgameodds.com) API. Batte
   - `/api/markets?league=NFL` — fetches + normalizes upcoming odds into card view-models (best price, fair odds, edge %, no-vig probability, per-bookmaker rows). Cached 20s.
   - `/api/game-log?league=...&teamID=...&statID=...&opponentTeamID=...&playerID=` — paginates through every finalized game SportsGameOdds has for that team (the API caps each page at 50, so this walks the `cursor` until exhausted). With `playerID`, extracts that player's stat line per game; without it, `statID` must be one of `team_win`/`team_margin`/`game_total`, computed from the team's own scoring. Returns full history + head-to-head splits + a `coverage` block. Cached 24h since finalized results don't change.
   - `/api/mlb-matchups?homeTeamID=...&awayTeamID=...&gameDate=YYYY-MM-DD` — looks up that game's probable starting pitchers via MLB's schedule endpoint, pulls each opposing team's active-roster hitters, and fetches each hitter's career at-bat history against that specific pitcher (MLB's `vsPlayer` split), aggregating the raw counting stats across seasons into one lifetime AVG/OBP/SLG/OPS line (rate stats aren't valid to average directly — only the underlying counts are). Fetches run in parallel via a thread pool since a full lineup is 10-15 independent calls. Cached: schedule/probable-pitcher lookups 2h, rosters 24h, matchup history 24h.
-  - `/api/best-no-vig` — fetches all four leagues in parallel, ranks by edge % (excluding an upper sanity cap that filters out illiquid/rare-prop artifacts like "Triples Over 0.5" showing a nonsensical +600% "edge"), and takes each league's own top slice before a final combined sort — otherwise MLB's far higher prop volume floods out the other three leagues entirely. Reuses the same 20s-cached per-league fetch `/api/markets` uses.
+  - `/api/best-no-vig` — ranks edge % across all 41 leagues (excluding an upper sanity cap that filters out illiquid/rare-prop artifacts like "Triples Over 0.5" showing a nonsensical +600% "edge"), taking each league's own top slice before a final combined sort so MLB's far higher prop volume can't flood out the rest. Computed once every 25s by a background thread and served from that cache — never computed inline on a request thread, since fanning out to 41 leagues synchronously was OOM-crashing the process on a memory-constrained host.
+  - `/api/golf` — auto-detects whichever PGA Tour event is currently live via [ESPN's public (unofficial) golf API](https://site.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard), and for 7 recurring events (BMW Championship, Tour Championship, Bank of Utah Championship, Baycurrent Classic, Mexico Open, WWT Championship, RSM Classic) cross-references each live player against their own 2021-2025 under-par history at that same event. No key needed. ESPN's `?event=` query param on `/scoreboard` is silently ignored (always returns whatever's live) — historical lookups actually need the separate `/leaderboard?event=` endpoint. Akamai (fronting espn.com) blocks Python's own TLS/urllib stack outright regardless of headers, so these calls shell out to `curl` instead. Same background-refresh-into-cache pattern as Best No-Vig (every 90s).
+  - `/deploy` — a POST-only webhook target for GitHub's push events. Verifies the payload's HMAC-SHA256 signature against `DEPLOY_WEBHOOK_SECRET` before doing anything; on a verified push to `main`, runs `git pull && systemctl restart vantage`.
   - Both external APIs are called with a real browser `User-Agent` — Cloudflare (in front of SportsGameOdds) and other bot-protection blocks the default Python/curl UA string outright.
 - `odds.js` / `mlb.js` — thin fetch clients; no parsing logic duplicated here.
 - `sample-odds.js` — static fallback data (clearly fake) shown only if the live feed errors out.
-- `app.js` / `index.html` / `style.css` — UI: a Markets/Best No-Vig/MLB Matchups tab toggle, league + market-type + sportsbook + stat-type filters, sort, card grid, detail modal (bookmaker table + no-vig + recent-form section), watchlist, theme toggle.
+- `app.js` / `index.html` / `style.css` — UI: a Markets/Best No-Vig/MLB Matchups/Golf tab toggle, league + market-type + sportsbook + stat-type filters, sort, card grid, detail modal (bookmaker table + no-vig + recent-form section), watchlist, theme toggle.
 
 ## Setup
 
@@ -34,16 +36,42 @@ python3 server.py
 
 Then open http://localhost:5173
 
-## Deploy to Render (free)
+## Deploy to your own server (Oracle Cloud Always Free, or any VM)
 
-This is what lets the [VantageIOS](../VantageIOS) app work on a real device, since a physical phone can't reach your Mac's `localhost`. Render's free tier needs no credit card, stays deployed indefinitely, and gives you a free HTTPS URL (cold starts after ~15 min idle — the first request after that takes 30-50s).
+This is what lets the [VantageIOS](../VantageIOS) app work on a real device, since a physical phone can't reach your Mac's `localhost`. This app previously ran on Render's free tier, but that tier's 512MB RAM was getting OOM-killed once the league count grew to 41 (each restart shows as an instant 502) — moved to a self-managed VM instead, which has far more headroom and doesn't spin down when idle.
 
-1. Push this `Vantage` folder to a GitHub repo (public or private — either works with Render).
-2. In the [Render dashboard](https://dashboard.render.com), New → Web Service → connect that repo. Render should auto-detect `render.yaml` (already in this folder) and pre-fill the build/start commands.
-3. Under Environment, add `SPORTSGAMEODDS_API_KEY` with your key — this replaces the local `.env` file, which never gets committed.
-4. Deploy. Once it's live, note the `https://<something>.onrender.com` URL — that's both the web dashboard (now public) and the API the iOS app should point at.
+1. Provision a VM (an Oracle Cloud "Always Free" Ampere instance works well — 4 OCPUs / 24GB RAM available on the free tier, though this app only needs a small fraction of that). Ubuntu is assumed below.
+2. **Open port 80 in *two* places** — this is the most common gotcha:
+   - The cloud provider's network-level firewall (on OCI: the instance's subnet → Security List → Add Ingress Rule, source `0.0.0.0/0`, TCP, port 80).
+   - The instance's own OS-level firewall. Oracle's stock Ubuntu image ships `iptables` rules that allow only SSH by default and reject everything else — you need an explicit `ACCEPT` rule for port 80 too, added *before* the existing `REJECT` rule, then persisted (`sudo netfilter-persistent save`) so it survives reboots.
+3. Install `git`, clone this repo, and add `.env` with your `SPORTSGAMEODDS_API_KEY` (see Setup above) plus a `DEPLOY_WEBHOOK_SECRET` (any long random string) if you want auto-deploy — see below.
+4. Run it as a systemd service so it survives reboots and restarts on crash:
+   ```
+   [Unit]
+   Description=Vantage odds comparison server
+   After=network.target
 
-Since this makes the API-comparison proxy reachable by anyone with the URL (not just you), keep in mind it draws against your own SportsGameOdds quota if someone else finds and hits it. There's no auth on it currently — add some (a shared-secret header, for instance) if that's a concern for your key's rate limits.
+   [Service]
+   Type=simple
+   User=ubuntu
+   WorkingDirectory=/home/ubuntu/vantage-odds
+   Environment=PORT=80
+   ExecStart=/usr/bin/python3 /home/ubuntu/vantage-odds/server.py
+   Restart=always
+   RestartSec=3
+   AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+   [Install]
+   WantedBy=multi-user.target
+   ```
+   `AmbientCapabilities=CAP_NET_BIND_SERVICE` lets the process bind port 80 without running as root. Then `sudo systemctl daemon-reload && sudo systemctl enable --now vantage`.
+5. **Auto-deploy on push** (mirrors what Render's GitHub integration did): add a GitHub webhook (repo → Settings → Webhooks → Add webhook) pointing at `http://<your-ip>/deploy`, content type `application/json`, secret = your `DEPLOY_WEBHOOK_SECRET`, event = "Just the push event". The `/deploy` endpoint verifies GitHub's HMAC signature before doing anything, then runs `git pull && systemctl restart vantage` — which needs a narrow passwordless-sudo grant:
+   ```
+   echo 'ubuntu ALL=(ALL) NOPASSWD: /bin/systemctl restart vantage' | sudo tee /etc/sudoers.d/vantage-deploy
+   sudo chmod 440 /etc/sudoers.d/vantage-deploy
+   ```
+
+Since this makes the API-comparison proxy reachable by anyone with the URL (not just you), keep in mind it draws against your own SportsGameOdds quota if someone else finds and hits it. There's no auth on the app's own API routes — only `/deploy` is authenticated (via the webhook signature).
 
 ## Notes / limitations
 
