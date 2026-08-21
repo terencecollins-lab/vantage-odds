@@ -37,6 +37,7 @@
       <button class="view-tab active" id="view-tab-markets" data-view="markets">Markets</button>
       <button class="view-tab" id="view-tab-novig" data-view="novig">Best No-Vig</button>
       <button class="view-tab" id="view-tab-mlb" data-view="mlb">MLB Matchups</button>
+      <button class="view-tab" id="view-tab-golf" data-view="golf">Golf</button>
     </nav>
 
     <p id="status-banner" class="status-banner" hidden></p>
@@ -95,6 +96,14 @@
         </div>
       </section>
       <div id="mlb-matchup-content"></div>
+    </div>
+
+    <div id="golf-view" hidden>
+      <section class="controls-row">
+        <p class="mlb-subtitle" id="golf-tournament-label" style="margin:0;">Loading current PGA Tour event…</p>
+      </section>
+      <div id="golf-content"></div>
+      <p class="empty-state" id="golf-empty" hidden>No PGA Tour event is currently in progress.</p>
     </div>
 
     <footer class="app-footer">

@@ -91,6 +91,15 @@ export async function fetchLiveItems(leagueID) {
   return json.items;
 }
 
+export async function fetchGolf() {
+  const res = await fetch('/api/golf');
+  const json = await res.json();
+  if (!res.ok || json.success === false) {
+    throw new Error(json.error || `Request failed (${res.status})`);
+  }
+  return json; // { tournament, leaderboard, historyTournament }
+}
+
 export async function fetchBestNoVig() {
   const res = await fetch('/api/best-no-vig');
   const json = await res.json();

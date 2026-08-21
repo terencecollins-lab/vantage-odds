@@ -9,6 +9,8 @@
   --positive: #0f9d78;
   --positive-soft: #e3f7f0;
   --negative: #d1425a;
+  --warn: #c96a15;
+  --warn-soft: #fbead9;
   --shadow: 0 1px 2px rgba(20, 22, 40, 0.04), 0 8px 24px rgba(20, 22, 40, 0.05);
   --radius: 14px;
   color-scheme: light;
@@ -25,6 +27,8 @@
   --positive: #35c99a;
   --positive-soft: #16332b;
   --negative: #ff6b81;
+  --warn: #e8912f;
+  --warn-soft: #3a2a15;
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.2), 0 8px 24px rgba(0, 0, 0, 0.3);
   color-scheme: dark;
 }
@@ -91,6 +95,44 @@ body {
 .mlb-table th:first-child, .mlb-table td:first-child { text-align: left; }
 .mlb-table td { padding: 8px 10px; border-bottom: 1px solid var(--border); text-align: right; font-family: 'JetBrains Mono', monospace; }
 .mlb-table td:nth-child(2) { font-family: inherit; color: var(--text-muted); }
+
+.golf-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+.golf-row:last-child { border-bottom: none; }
+.golf-rank { width: 26px; color: var(--text-muted); font-family: 'JetBrains Mono', monospace; }
+.golf-name { flex: 1; font-weight: 600; min-width: 120px; }
+.golf-total { width: 48px; text-align: right; font-family: 'JetBrains Mono', monospace; font-weight: 700; }
+.golf-rounds { display: flex; gap: 4px; flex-wrap: wrap; }
+.golf-round-score {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  padding: 2px 6px;
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+}
+.golf-round-score.under-par {
+  background: var(--warn-soft);
+  color: var(--warn);
+  border-color: transparent;
+  font-weight: 700;
+}
+.golf-hist-badge {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--warn);
+  background: var(--warn-soft);
+  padding: 3px 8px;
+  border-radius: 6px;
+  white-space: nowrap;
+}
 
 .brand { display: flex; align-items: center; gap: 10px; }
 .brand-mark {

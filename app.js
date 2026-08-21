@@ -1,4 +1,4 @@
-import { LEAGUES, LEAGUE_GROUPS, MARKET_TYPES, fetchLiveItems, fetchMarketsRaw, fetchBestNoVig, fetchGameLog, formatAmerican } from './odds.js';
+import { LEAGUES, LEAGUE_GROUPS, MARKET_TYPES, fetchLiveItems, fetchMarketsRaw, fetchBestNoVig, fetchGolf, fetchGameLog, formatAmerican } from './odds.js';
 import { SAMPLE_ITEMS } from './sample-odds.js';
 import { fetchMlbGames, fetchMlbMatchup } from './mlb.js';
 
@@ -28,6 +28,12 @@ const state = {
   noVigLoading: false,
   noVigError: null,
   noVigTimer: null,
+  golfTournament: null,
+  golfLeaderboard: [],
+  golfHistoryTournament: null,
+  golfLoading: false,
+  golfError: null,
+  golfTimer: null,
 };
 
 const el = {
@@ -49,14 +55,19 @@ const el = {
   viewTabMarkets: document.getElementById('view-tab-markets'),
   viewTabMlb: document.getElementById('view-tab-mlb'),
   viewTabNoVig: document.getElementById('view-tab-novig'),
+  viewTabGolf: document.getElementById('view-tab-golf'),
   marketsView: document.getElementById('markets-view'),
   mlbView: document.getElementById('mlb-matchups-view'),
   noVigView: document.getElementById('novig-view'),
+  golfView: document.getElementById('golf-view'),
   mlbGameSelect: document.getElementById('mlb-game-select'),
   mlbMatchupContent: document.getElementById('mlb-matchup-content'),
   noVigGrid: document.getElementById('novig-grid'),
   noVigEmpty: document.getElementById('novig-empty'),
   noVigRefresh: document.getElementById('novig-refresh'),
+  golfTournamentLabel: document.getElementById('golf-tournament-label'),
+  golfContent: document.getElementById('golf-content'),
+  golfEmpty: document.getElementById('golf-empty'),
 };
 
 function starIcon(active) {
@@ -588,14 +599,96 @@ function stopNoVigAutoRefresh() {
   }
 }
 
+const GOLF_REFRESH_INTERVAL_MS = 60000;
+
+function golfRoundCell(round) {
+  const cls = round.underPar ? 'golf-round-score under-par' : 'golf-round-score';
+  return `<span class="${cls}" title="Round ${round.round}: ${round.strokes} (par ${round.par})">${round.strokes}</span>`;
+}
+
+function renderGolfRow(player, rank) {
+  const histBadge = player.historicalUnderPar
+    ? `<span class="golf-hist-badge" title="Also went under par at this event in ${player.historicalYear} (best round: ${player.historicalBestRound})">Under par here in ${player.historicalYear}</span>`
+    : '';
+  return `<div class="golf-row">
+    <span class="golf-rank">${rank}</span>
+    <span class="golf-name">${player.name}</span>
+    <span class="golf-total">${player.total ?? '—'}</span>
+    <div class="golf-rounds">${player.rounds.map(golfRoundCell).join('')}</div>
+    ${histBadge}
+  </div>`;
+}
+
+function renderGolf() {
+  if (state.golfLoading && !state.golfTournament) {
+    el.golfEmpty.hidden = true;
+    el.golfTournamentLabel.textContent = 'Loading current PGA Tour event…';
+    el.golfContent.innerHTML = '';
+    return;
+  }
+  if (state.golfError && !state.golfTournament) {
+    el.golfEmpty.hidden = true;
+    el.golfTournamentLabel.textContent = `Could not load golf leaderboard (${state.golfError}).`;
+    el.golfContent.innerHTML = '';
+    return;
+  }
+  if (!state.golfTournament) {
+    el.golfTournamentLabel.textContent = 'No PGA Tour event is currently in progress.';
+    el.golfEmpty.hidden = false;
+    el.golfContent.innerHTML = '';
+    return;
+  }
+  el.golfEmpty.hidden = true;
+  const historyNote = state.golfHistoryTournament
+    ? ` — cross-referenced against 2021–2025 under-par history for ${state.golfHistoryTournament}`
+    : ' (no under-par history tracked for this event)';
+  el.golfTournamentLabel.textContent = `${state.golfTournament.name} — ${state.golfTournament.status}${historyNote}`;
+  const sorted = [...state.golfLeaderboard].sort((a, b) => {
+    const av = a.total === 'E' ? 0 : parseInt(a.total, 10);
+    const bv = b.total === 'E' ? 0 : parseInt(b.total, 10);
+    return (Number.isNaN(av) ? 999 : av) - (Number.isNaN(bv) ? 999 : bv);
+  });
+  el.golfContent.innerHTML = `<div class="mlb-pitcher-card">${sorted.map((p, i) => renderGolfRow(p, i + 1)).join('')}</div>`;
+}
+
+async function loadGolf() {
+  state.golfLoading = true;
+  state.golfError = null;
+  renderGolf();
+  try {
+    const { tournament, leaderboard, historyTournament } = await fetchGolf();
+    state.golfTournament = tournament;
+    state.golfLeaderboard = leaderboard || [];
+    state.golfHistoryTournament = historyTournament;
+  } catch (err) {
+    state.golfError = err.message;
+  }
+  state.golfLoading = false;
+  renderGolf();
+}
+
+function startGolfAutoRefresh() {
+  stopGolfAutoRefresh();
+  state.golfTimer = setInterval(loadGolf, GOLF_REFRESH_INTERVAL_MS);
+}
+
+function stopGolfAutoRefresh() {
+  if (state.golfTimer) {
+    clearInterval(state.golfTimer);
+    state.golfTimer = null;
+  }
+}
+
 function setView(view) {
   state.view = view;
   el.viewTabMarkets.classList.toggle('active', view === 'markets');
   el.viewTabMlb.classList.toggle('active', view === 'mlb');
   el.viewTabNoVig.classList.toggle('active', view === 'novig');
+  el.viewTabGolf.classList.toggle('active', view === 'golf');
   el.marketsView.hidden = view !== 'markets';
   el.mlbView.hidden = view !== 'mlb';
   el.noVigView.hidden = view !== 'novig';
+  el.golfView.hidden = view !== 'golf';
   if (view === 'mlb' && state.mlbGames.length === 0) {
     loadMlbGames();
   }
@@ -605,10 +698,17 @@ function setView(view) {
   } else {
     stopNoVigAutoRefresh();
   }
+  if (view === 'golf') {
+    if (!state.golfTournament) loadGolf();
+    startGolfAutoRefresh();
+  } else {
+    stopGolfAutoRefresh();
+  }
 }
 
 el.viewTabMarkets.addEventListener('click', () => setView('markets'));
 el.viewTabMlb.addEventListener('click', () => setView('mlb'));
+el.viewTabGolf.addEventListener('click', () => setView('golf'));
 el.viewTabNoVig.addEventListener('click', () => setView('novig'));
 el.noVigRefresh.addEventListener('click', () => loadBestNoVig());
 el.mlbGameSelect.addEventListener('change', () => {
