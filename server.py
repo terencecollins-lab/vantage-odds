@@ -6,6 +6,8 @@ lives only here, never reaching the browser or any client app.
 
 import concurrent.futures
 import datetime
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -104,6 +106,7 @@ def load_env_file(path=None):
 
 load_env_file()
 API_KEY = os.environ.get("SPORTSGAMEODDS_API_KEY", "")
+DEPLOY_WEBHOOK_SECRET = os.environ.get("DEPLOY_WEBHOOK_SECRET", "")
 
 MARKET_TYPE_BY_BETTYPE = {"ml": "Moneyline", "sp": "Spread", "ou": "Total"}
 
@@ -1008,6 +1011,14 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self.handle_static(parsed)
 
+    def do_POST(self):
+        parsed = urllib.parse.urlsplit(self.path)
+        if parsed.path == "/deploy":
+            self.handle_deploy()
+        else:
+            self.send_response(404)
+            self.end_headers()
+
     def require_api_key(self):
         if not API_KEY:
             self.send_json(500, {"error": "SPORTSGAMEODDS_API_KEY is not set on the server"})
@@ -1055,6 +1066,42 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(200, {"success": True, "tournament": None, "leaderboard": [], "historyTournament": None, "preparing": True})
             return
         self.send_json(200, payload)
+
+    def handle_deploy(self):
+        """GitHub webhook target: on a push to main, pulls and restarts the
+        systemd service. Verifies GitHub's HMAC-SHA256 payload signature so
+        this can't be triggered by an arbitrary POST from anyone who finds
+        the URL -- the shared secret lives only in .env and the webhook's own
+        config, never in git."""
+        length = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(length) if length else b""
+
+        if not DEPLOY_WEBHOOK_SECRET:
+            self.send_json(500, {"error": "DEPLOY_WEBHOOK_SECRET is not set on the server"})
+            return
+
+        signature = self.headers.get("X-Hub-Signature-256") or ""
+        expected = "sha256=" + hmac.new(DEPLOY_WEBHOOK_SECRET.encode(), body, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(signature, expected):
+            self.send_json(401, {"error": "Invalid signature"})
+            return
+
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError:
+            payload = {}
+        if payload.get("ref") not in (None, "refs/heads/main"):
+            self.send_json(200, {"success": True, "skipped": f"ignoring push to {payload.get('ref')}"})
+            return
+
+        self.send_json(200, {"success": True, "deploying": True})
+        # The restart kills this very process, so it runs detached with a
+        # short delay -- long enough for the response above to actually reach
+        # GitHub before systemd tears this process down.
+        subprocess.Popen(
+            ["bash", "-c", f"sleep 1 && cd {SCRIPT_DIR} && git pull && sudo systemctl restart vantage"],
+            start_new_session=True,
+        )
 
     def handle_game_log(self, parsed):
         if not self.require_api_key():
