@@ -1,4 +1,4 @@
-import { LEAGUES, MARKET_TYPES, fetchLiveItems, fetchMarketsRaw, fetchBestNoVig, fetchGameLog, formatAmerican } from './odds.js';
+import { LEAGUES, LEAGUE_GROUPS, MARKET_TYPES, fetchLiveItems, fetchMarketsRaw, fetchBestNoVig, fetchGameLog, formatAmerican } from './odds.js';
 import { SAMPLE_ITEMS } from './sample-odds.js';
 import { fetchMlbGames, fetchMlbMatchup } from './mlb.js';
 
@@ -189,7 +189,7 @@ function renderChips() {
 
 function renderLeagueSelect() {
   if (!el.leagueSelect.dataset.built) {
-    el.leagueSelect.innerHTML = LEAGUES.map((l) => `<option value="${l.id}">${l.label}</option>`).join('');
+    el.leagueSelect.innerHTML = LEAGUE_GROUPS.map((g) => `<optgroup label="${g.sport}">${g.leagues.map((l) => `<option value="${l.id}">${l.label}</option>`).join('')}</optgroup>`).join('');
     el.leagueSelect.dataset.built = 'true';
     el.leagueSelect.addEventListener('change', () => {
       state.league = el.leagueSelect.value;

@@ -83,9 +83,27 @@ load_env_file()
 API_KEY = os.environ.get("SPORTSGAMEODDS_API_KEY", "")
 
 MARKET_TYPE_BY_BETTYPE = {"ml": "Moneyline", "sp": "Spread", "ou": "Total"}
-ALL_LEAGUES = ["NFL", "NBA", "MLB", "NHL"]
+
+# Every league SportsGameOdds exposes that still fits Vantage's "Team A @ Team
+# B" card model (head-to-head team or 1v1 matchups). Golf (PGA_MEN, LIV_TOUR)
+# and the NON_SPORTS categories (Politics, TV, Movies, Music, Fun, Events,
+# Weather, Celebrities, Markets) are deliberately excluded -- those are
+# outright/prop formats with no home/away pairing, which this card model
+# can't represent.
+ALL_LEAGUES = [
+    "NFL", "NCAAF", "CFL", "USFL", "XFL",
+    "NBA", "NCAAB", "WNBA", "NBA_G_LEAGUE",
+    "MLB", "NPB", "KBO", "CPBL", "MILB_AAA", "WBC", "LBPRC", "LIDOM", "LMP", "LVBP",
+    "NHL", "AHL", "KHL", "SHL",
+    "EPL", "UEFA_CHAMPIONS_LEAGUE", "UEFA_EUROPA_LEAGUE", "LA_LIGA", "BUNDESLIGA",
+    "IT_SERIE_A", "FR_LIGUE_1", "MLS", "BR_SERIE_A", "LIGA_MX", "INTERNATIONAL_SOCCER",
+    "EHF_EURO", "EHF_EURO_CUP", "SEHA", "IHF_SUPER_GLOBE",
+    "ATP", "WTA",
+    "UFC",
+]
 BEST_NO_VIG_TOP_N = 40
 BEST_NO_VIG_MAX_EDGE_PCT = 12  # excludes illiquid/rare-prop artifacts (see below)
+BEST_NO_VIG_MAX_WORKERS = 20  # cap concurrent upstream calls regardless of league count
 
 BOOKMAKER_LABELS = {
     "fanduel": "FanDuel", "draftkings": "DraftKings", "betmgm": "BetMGM",
@@ -347,9 +365,15 @@ def build_markets(events):
 
         event_odds = event.get("odds") or {}
         for odd_id, odd in event_odds.items():
-            if odd.get("periodID") != "game":
-                continue
             bet_type = odd.get("betTypeID")
+            period = odd.get("periodID")
+            # Soccer/handball have no draw-less full-game moneyline at periodID
+            # "game" -- their 2-way (draw-no-bet) line only exists at "reg"
+            # (regulation). Everything else (Spread/Total, every other league)
+            # still requires "game" so this doesn't pull in duplicate
+            # regulation-only Totals/Spreads alongside the full-game ones.
+            if period != "game" and not (period == "reg" and bet_type == "ml"):
+                continue
             market_type = MARKET_TYPE_BY_BETTYPE.get(bet_type)
             if not market_type:
                 continue
@@ -697,7 +721,7 @@ class Handler(BaseHTTPRequestHandler):
         coverage_map = {}
         errors = {}
         per_league_ranked = {}
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(ALL_LEAGUES)) as pool:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(BEST_NO_VIG_MAX_WORKERS, len(ALL_LEAGUES))) as pool:
             for league_id, items, coverage, error in pool.map(one_league, ALL_LEAGUES):
                 if coverage:
                     coverage_map[league_id] = coverage
