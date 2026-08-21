@@ -125,14 +125,10 @@ ALL_LEAGUES = [
 ]
 BEST_NO_VIG_TOP_N = 40
 BEST_NO_VIG_MAX_EDGE_PCT = 12  # excludes illiquid/rare-prop artifacts (see below)
-# Render's free tier is 512MB RAM / a shared 0.1 vCPU. Fanning out to all 41
-# leagues at once -- several of them (MLB, NPB, KBO, CPBL, WBC, MiLB, the
-# winter-ball leagues) each carry thousands of player-prop odds per event --
-# was OOM-crashing the process there, even though it ran fine locally with
-# far more headroom. Low concurrency + a smaller per-league event fetch keeps
-# peak memory well under that ceiling; this endpoint doesn't need every prop,
-# just enough events to find a handful of good edges per league.
-BEST_NO_VIG_MAX_WORKERS = 4
+# Render's free tier is 512MB RAM / a shared 0.1 vCPU. This endpoint doesn't
+# need every prop from every league, just enough events to find a handful of
+# good edges per league -- see compute_best_no_vig for why it fetches
+# leagues one at a time rather than fanning out.
 BEST_NO_VIG_EVENT_LIMIT = 6
 
 BOOKMAKER_LABELS = {
@@ -692,7 +688,27 @@ def build_mlb_matchup(home_team_id, away_team_id, game_date):
 
 
 def compute_best_no_vig():
-    def one_league(league_id):
+    # Take each league's own top slice so one high-volume league (MLB has
+    # 10x+ the props of the others) can't flood out the rest -- "across
+    # sports" should actually mean across sports.
+    per_league_slice = max(1, BEST_NO_VIG_TOP_N // len(ALL_LEAGUES))
+
+    # Deliberately sequential, one league at a time, not fanned out over a
+    # thread pool: this fan-out was OOM-crashing the process on Render's
+    # 512MB free tier even at reduced concurrency, because retaining every
+    # league's *full* item list (some -- MLB, NPB, KBO, CPBL, WBC, the
+    # winter-ball leagues -- run thousands of player-prop odds per event) in
+    # memory at once was the real cost, independent of how many ran
+    # concurrently. Slicing each league down to its top few edges
+    # immediately, before moving to the next league, means only one league's
+    # full payload is ever in memory at a time, and the retained cross-league
+    # total is at most BEST_NO_VIG_TOP_N items. This runs on a timer in the
+    # background now, not on the request path, so the added wall-clock time
+    # from going sequential costs nothing user-facing.
+    coverage_map = {}
+    errors = {}
+    candidates = []
+    for league_id in ALL_LEAGUES:
         try:
             data = fetch_events(
                 {"leagueID": league_id, "oddsAvailable": "true", "limit": str(BEST_NO_VIG_EVENT_LIMIT)},
@@ -700,38 +716,21 @@ def compute_best_no_vig():
                 ttl=MARKETS_CACHE_TTL,
             )
             items = build_markets(data.get("data") or [])
-            coverage = get_league_coverage_since(league_id)
-            return league_id, items, coverage, None
+            coverage_map[league_id] = get_league_coverage_since(league_id)
         except UpstreamError as e:
-            return league_id, [], None, e.message
+            errors[league_id] = e.message
+            continue
 
-    coverage_map = {}
-    errors = {}
-    per_league_ranked = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(BEST_NO_VIG_MAX_WORKERS, len(ALL_LEAGUES))) as pool:
-        for league_id, items, coverage, error in pool.map(one_league, ALL_LEAGUES):
-            if coverage:
-                coverage_map[league_id] = coverage
-            if error:
-                errors[league_id] = error
-            # Edge is only meaningful with a real fair-odds comparison, and
-            # only a positive one is "value" at all. The upper cap excludes
-            # ultra-rare props (e.g. "Triples Over 0.5") where a thin,
-            # illiquid market can show a nonsensical multi-hundred-percent
-            # "edge" that's a data/liquidity artifact, not a real
-            # opportunity -- genuine sportsbook mispricing essentially
-            # never exceeds this range.
-            ranked = [i for i in items if i.get("edgePct") is not None and 0 < i["edgePct"] <= BEST_NO_VIG_MAX_EDGE_PCT]
-            ranked.sort(key=lambda i: i["edgePct"], reverse=True)
-            per_league_ranked[league_id] = ranked
+        # Edge is only meaningful with a real fair-odds comparison, and only
+        # a positive one is "value" at all. The upper cap excludes
+        # ultra-rare props (e.g. "Triples Over 0.5") where a thin, illiquid
+        # market can show a nonsensical multi-hundred-percent "edge" that's
+        # a data/liquidity artifact, not a real opportunity -- genuine
+        # sportsbook mispricing essentially never exceeds this range.
+        ranked = [i for i in items if i.get("edgePct") is not None and 0 < i["edgePct"] <= BEST_NO_VIG_MAX_EDGE_PCT]
+        ranked.sort(key=lambda i: i["edgePct"], reverse=True)
+        candidates.extend(ranked[:per_league_slice])
 
-    # Take each league's own top slice first so one high-volume league
-    # (MLB has 10x+ the props of the others) can't flood out the rest --
-    # "across sports" should actually mean across sports.
-    per_league_slice = max(1, BEST_NO_VIG_TOP_N // len(ALL_LEAGUES))
-    candidates = []
-    for league_id in ALL_LEAGUES:
-        candidates.extend(per_league_ranked.get(league_id, [])[:per_league_slice])
     candidates.sort(key=lambda i: i["edgePct"], reverse=True)
     top = candidates[:BEST_NO_VIG_TOP_N]
 
@@ -814,12 +813,15 @@ class Handler(BaseHTTPRequestHandler):
         with _best_no_vig_lock:
             payload = _best_no_vig_cache["payload"]
         if payload is None:
-            # First hit before the background refresh loop has completed its
-            # first cycle -- compute inline so the request isn't left hanging.
-            payload = compute_best_no_vig()
-            with _best_no_vig_lock:
-                _best_no_vig_cache["payload"] = payload
-                _best_no_vig_cache["computed_at"] = time.time()
+            # Background refresh loop hasn't completed its first cycle yet
+            # (just after server startup). Computing all 41 leagues
+            # sequentially takes well over a minute on Render's free-tier
+            # CPU -- never do that inline on a request thread, since that's
+            # long enough to hit Render's own proxy timeout. The frontend
+            # already polls this endpoint every 30s, so it'll pick up the
+            # real result on its own shortly.
+            self.send_json(200, {"success": True, "items": [], "coverageSince": {}, "preparing": True})
+            return
         self.send_json(200, payload)
 
     def handle_game_log(self, parsed):
