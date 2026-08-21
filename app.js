@@ -257,14 +257,20 @@ function openModal(id) {
   const item = state.items.find((i) => i.id === id);
   if (!item) return;
   const isWatched = state.watchlist.has(item.id);
+  const hasAnyLine = item.bookmakers.some((b) => b.line != null);
   const rows = item.bookmakers
-    .map(
-      (b, i) => `<tr class="${i === 0 ? 'best-row' : ''}">
+    .map((b) => {
+      const isBest = b.onLine !== false && b.label === item.bestVendor && b.american === item.bestPrice;
+      const lineCell = hasAnyLine
+        ? `<td class="${b.onLine === false ? 'offline-line' : ''}" title="${b.onLine === false ? 'Different line than the consensus — not directly comparable' : ''}">${b.line ?? ''}</td>`
+        : '';
+      return `<tr class="${isBest ? 'best-row' : ''} ${b.onLine === false ? 'offline-row' : ''}">
         <td class="vendor-name">${b.label}</td>
+        ${lineCell}
         <td class="price-cell">${formatAmerican(b.american)}</td>
         <td>${b.deeplink ? `<a class="stock-tag in" href="${b.deeplink}" target="_blank" rel="noopener">Open ↗</a>` : '<span class="stock-tag out">No link</span>'}</td>
-      </tr>`
-    )
+      </tr>`;
+    })
     .join('');
 
   el.modalContent.innerHTML = `
@@ -281,10 +287,11 @@ function openModal(id) {
     ${
       item.bookmakers.length
         ? `<table class="vendor-table">
-      <thead><tr><th>Sportsbook</th><th>Odds</th><th></th></tr></thead>
+      <thead><tr><th>Sportsbook</th>${hasAnyLine ? '<th>Line</th>' : ''}<th>Odds</th><th></th></tr></thead>
       <tbody>${rows}</tbody>
-    </table>`
-        : '<p class="form-note">No per-bookmaker breakdown at this API tier — showing the consensus line only.</p>'
+    </table>
+    ${item.bookmakers.some((b) => b.onLine === false) ? '<p class="form-note">Rows in a different shade quote a different line than the rest — their price isn\'t directly comparable and isn\'t eligible to be "best price."</p>' : ''}`
+        : '<p class="form-note">No sportsbook currently quotes this exact line — showing the consensus price only.</p>'
     }
     ${item.statID ? '<div id="recent-form" class="recent-form"><h3>Recent form</h3><p class="form-note">Loading…</p></div>' : ''}
     <div class="modal-actions">

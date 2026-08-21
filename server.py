@@ -88,7 +88,22 @@ BOOKMAKER_LABELS = {
     "betrivers": "BetRivers", "unibet": "Unibet", "pinnacle": "Pinnacle",
     "betonline": "BetOnline", "lowvig": "LowVig", "hardrockbet": "Hard Rock Bet",
     "betparx": "betPARX", "ballybet": "Bally Bet", "fliff": "Fliff",
+    "bet365": "bet365", "fanatics": "Fanatics", "mybookie": "MyBookie",
+    "betanysports": "BetAnySports", "betfairexchange": "Betfair Exchange",
+    "betfairsportsbook": "Betfair Sportsbook", "sugarhouse": "SugarHouse",
+    "gtbets": "GTbets", "prophetexchange": "Prophet Exchange", "betus": "BetUS",
+    "bookmakereu": "Bookmaker.eu", "prizepicks": "PrizePicks", "novig": "Novig",
+    "1xbet": "1xBet", "betrsportsbook": "Betr Sportsbook", "betsson": "Betsson",
+    "everygame": "Everygame", "grosvenor": "Grosvenor", "ladbrokes": "Ladbrokes",
+    "leovegas": "LeoVegas", "matchbook": "Matchbook", "neds": "Neds",
+    "nordicbet": "NordicBet", "paddypower": "Paddy Power", "playup": "PlayUp",
+    "polymarket": "Polymarket", "sportsbet": "Sportsbet", "tab": "TAB",
+    "tabtouch": "TABtouch", "thescorebet": "theScore Bet",
 }
+
+# This key sometimes shows up in byBookmaker for an unidentified source --
+# odds with no attributable book aren't useful for a "shop this book" comparison.
+IGNORED_BOOKMAKER_KEYS = {"unknown"}
 
 
 class UpstreamError(Exception):
@@ -264,33 +279,46 @@ def build_markets(events):
             if market_type == "Total" and stat_entity != "all" and not is_player_prop:
                 continue  # skip team sub-totals for this MVP
 
+            # Consensus line first -- individual books can (and PrizePicks
+            # especially does) quote a materially different number for what's
+            # nominally "the same" prop, so this is the yardstick each book's
+            # own line gets compared against.
+            raw_line = odd.get("bookOverUnder") or odd.get("bookSpread")
+
             book_entries = []
             for book, v in (odd.get("byBookmaker") or {}).items():
-                if not v.get("available") or not v.get("odds"):
+                if book in IGNORED_BOOKMAKER_KEYS or not v.get("available") or not v.get("odds"):
                     continue
                 dec = american_to_decimal(v["odds"])
                 if dec is None:
                     continue
+                book_line = v.get("overUnder") or v.get("spread")
+                on_line = raw_line is None or book_line is None or book_line == raw_line
                 book_entries.append({
                     "book": book,
                     "label": bookmaker_label(book),
                     "american": v["odds"],
+                    "line": book_line,
+                    "onLine": on_line,
                     "deeplink": v.get("deeplink"),
                     "_decimal": dec,
                 })
-            book_entries.sort(key=lambda b: b["_decimal"], reverse=True)
+            # Same-line books sort to the top by best payout; off-line books
+            # (different line entirely -- not a comparable price) trail after.
+            book_entries.sort(key=lambda b: (not b["onLine"], -b["_decimal"]))
+            on_line_entries = [b for b in book_entries if b["onLine"]]
 
             fair_decimal = american_to_decimal(odd.get("fairOdds")) if odd.get("fairOddsAvailable") else None
 
-            if book_entries:
-                best = book_entries[0]
+            if on_line_entries:
+                best = on_line_entries[0]
                 best_price = best["american"]
                 best_vendor = best["label"]
                 best_deeplink = best["deeplink"]
                 best_book_key = best["book"]
             elif odd.get("bookOddsAvailable") and odd.get("bookOdds"):
-                # No per-book breakdown at this API tier (common for player props) --
-                # fall back to the single consensus line so the market is still shown.
+                # No book quotes this exact line -- fall back to the single
+                # consensus line so the market is still shown.
                 best_price = odd["bookOdds"]
                 best_vendor = "Consensus"
                 best_deeplink = None
@@ -307,8 +335,6 @@ def build_markets(events):
             else:
                 side_label = home if stat_entity == "home" else away
 
-            # Spread's line lives under bookSpread, not bookOverUnder.
-            raw_line = odd.get("bookOverUnder") or odd.get("bookSpread")
             line_suffix = f" {raw_line}" if raw_line else ""
 
             if is_player_prop:

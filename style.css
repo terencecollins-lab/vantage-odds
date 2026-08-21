@@ -348,6 +348,8 @@ body {
 .vendor-table td { padding: 9px 8px; border-bottom: 1px solid var(--border); }
 .vendor-table tr:last-child td { border-bottom: none; }
 .vendor-table .best-row { background: var(--positive-soft); }
+.vendor-table .offline-row { opacity: 0.55; }
+.vendor-table .offline-line { color: var(--negative); font-weight: 700; }
 .vendor-table .price-cell { font-family: 'JetBrains Mono', monospace; font-weight: 600; }
 .stock-tag { font-size: 11px; font-weight: 600; padding: 2px 7px; border-radius: 6px; }
 .stock-tag.in { color: var(--positive); background: var(--positive-soft); }
