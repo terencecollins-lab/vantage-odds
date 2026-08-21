@@ -9,6 +9,7 @@ import datetime
 import json
 import os
 import re
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -64,6 +65,27 @@ MLB_TEAM_STATSAPI_ID = {
 }
 
 _cache = {}  # cache namespace + query string -> (expires_at, parsed_json)
+_cache_writes_since_sweep = 0
+_CACHE_SWEEP_EVERY = 25
+
+
+def _cache_set(key, ttl, value):
+    # Every distinct (namespace, query) pair gets its own permanent dict slot
+    # once written -- with 41 leagues' worth of teams/players/date-windows
+    # now possible, the space of distinct cache keys is large enough that
+    # entries were never being evicted, only overwritten if the exact same
+    # key came up again. Over a long-running process that grows without
+    # bound. A cheap periodic sweep of anything already past its own TTL
+    # keeps steady-state memory bounded to "what's still live" instead of
+    # "everything ever computed".
+    global _cache_writes_since_sweep
+    _cache[key] = (time.time() + ttl, value)
+    _cache_writes_since_sweep += 1
+    if _cache_writes_since_sweep >= _CACHE_SWEEP_EVERY:
+        _cache_writes_since_sweep = 0
+        now = time.time()
+        for k in [k for k, (expires_at, _) in _cache.items() if expires_at <= now]:
+            del _cache[k]
 
 
 def load_env_file(path=None):
@@ -103,7 +125,15 @@ ALL_LEAGUES = [
 ]
 BEST_NO_VIG_TOP_N = 40
 BEST_NO_VIG_MAX_EDGE_PCT = 12  # excludes illiquid/rare-prop artifacts (see below)
-BEST_NO_VIG_MAX_WORKERS = 20  # cap concurrent upstream calls regardless of league count
+# Render's free tier is 512MB RAM / a shared 0.1 vCPU. Fanning out to all 41
+# leagues at once -- several of them (MLB, NPB, KBO, CPBL, WBC, MiLB, the
+# winter-ball leagues) each carry thousands of player-prop odds per event --
+# was OOM-crashing the process there, even though it ran fine locally with
+# far more headroom. Low concurrency + a smaller per-league event fetch keeps
+# peak memory well under that ceiling; this endpoint doesn't need every prop,
+# just enough events to find a handful of good edges per league.
+BEST_NO_VIG_MAX_WORKERS = 4
+BEST_NO_VIG_EVENT_LIMIT = 6
 
 BOOKMAKER_LABELS = {
     "fanduel": "FanDuel", "draftkings": "DraftKings", "betmgm": "BetMGM",
@@ -171,7 +201,7 @@ def fetch_events(params, cache_ns, ttl):
         return cached[1]
 
     parsed = _get_json(f"{UPSTREAM_BASE}/events?{query}")
-    _cache[cache_key] = (time.time() + ttl, parsed)
+    _cache_set(cache_key, ttl, parsed)
     return parsed
 
 
@@ -197,7 +227,7 @@ def fetch_all_events(params, cache_ns, ttl, max_pages=GAME_LOG_MAX_PAGES):
         if not cursor:
             break
 
-    _cache[cache_key] = (time.time() + ttl, all_events)
+    _cache_set(cache_key, ttl, all_events)
     return all_events
 
 
@@ -251,7 +281,7 @@ def fetch_all_events_windowed(params, cache_ns, ttl, earliest_iso, window_days=3
             for events in pool.map(fetch_window, windows):
                 all_events.extend(events)
 
-    _cache[cache_key] = (time.time() + ttl, all_events)
+    _cache_set(cache_key, ttl, all_events)
     return all_events
 
 
@@ -272,7 +302,7 @@ def get_league_coverage_since(league_id):
     dates = [(e.get("status") or {}).get("startsAt") for e in events]
     dates = [d for d in dates if d]
     earliest = min(dates) if dates else None
-    _cache[cache_key] = (time.time() + COVERAGE_CACHE_TTL, earliest)
+    _cache_set(cache_key, COVERAGE_CACHE_TTL, earliest)
     return earliest
 
 
@@ -565,7 +595,7 @@ def _fetch_mlb_json(url, cache_ns, ttl):
     except json.JSONDecodeError:
         raise UpstreamError(502, "MLB Stats API returned a non-JSON response")
 
-    _cache[cache_key] = (time.time() + ttl, parsed)
+    _cache_set(cache_key, ttl, parsed)
     return parsed
 
 
@@ -661,6 +691,83 @@ def build_mlb_matchup(home_team_id, away_team_id, game_date):
     }
 
 
+def compute_best_no_vig():
+    def one_league(league_id):
+        try:
+            data = fetch_events(
+                {"leagueID": league_id, "oddsAvailable": "true", "limit": str(BEST_NO_VIG_EVENT_LIMIT)},
+                cache_ns="best-no-vig",
+                ttl=MARKETS_CACHE_TTL,
+            )
+            items = build_markets(data.get("data") or [])
+            coverage = get_league_coverage_since(league_id)
+            return league_id, items, coverage, None
+        except UpstreamError as e:
+            return league_id, [], None, e.message
+
+    coverage_map = {}
+    errors = {}
+    per_league_ranked = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(BEST_NO_VIG_MAX_WORKERS, len(ALL_LEAGUES))) as pool:
+        for league_id, items, coverage, error in pool.map(one_league, ALL_LEAGUES):
+            if coverage:
+                coverage_map[league_id] = coverage
+            if error:
+                errors[league_id] = error
+            # Edge is only meaningful with a real fair-odds comparison, and
+            # only a positive one is "value" at all. The upper cap excludes
+            # ultra-rare props (e.g. "Triples Over 0.5") where a thin,
+            # illiquid market can show a nonsensical multi-hundred-percent
+            # "edge" that's a data/liquidity artifact, not a real
+            # opportunity -- genuine sportsbook mispricing essentially
+            # never exceeds this range.
+            ranked = [i for i in items if i.get("edgePct") is not None and 0 < i["edgePct"] <= BEST_NO_VIG_MAX_EDGE_PCT]
+            ranked.sort(key=lambda i: i["edgePct"], reverse=True)
+            per_league_ranked[league_id] = ranked
+
+    # Take each league's own top slice first so one high-volume league
+    # (MLB has 10x+ the props of the others) can't flood out the rest --
+    # "across sports" should actually mean across sports.
+    per_league_slice = max(1, BEST_NO_VIG_TOP_N // len(ALL_LEAGUES))
+    candidates = []
+    for league_id in ALL_LEAGUES:
+        candidates.extend(per_league_ranked.get(league_id, [])[:per_league_slice])
+    candidates.sort(key=lambda i: i["edgePct"], reverse=True)
+    top = candidates[:BEST_NO_VIG_TOP_N]
+
+    return {
+        "success": True,
+        "items": top,
+        "coverageSince": coverage_map,
+        "leagueErrors": errors or None,
+    }
+
+
+_best_no_vig_lock = threading.Lock()
+_best_no_vig_cache = {"payload": None, "computed_at": 0}
+BEST_NO_VIG_REFRESH_INTERVAL = 25  # slightly above MARKETS_CACHE_TTL
+
+
+def refresh_best_no_vig_loop():
+    # This aggregation is identical for every viewer, so it's computed once on
+    # a timer and served from memory -- not recomputed per request. Besides
+    # being wasteful, computing it inline per HTTP request meant concurrent
+    # viewers (or the client's own 30s auto-refresh poll) could pile up
+    # duplicate fan-outs to all 41 leagues at once, which was OOM-crashing the
+    # process on Render's 512MB free tier (several of the newly added
+    # leagues -- MLB, NPB, KBO, CPBL, WBC, the winter-ball leagues -- each
+    # carry thousands of player-prop odds per event).
+    while True:
+        try:
+            payload = compute_best_no_vig()
+            with _best_no_vig_lock:
+                _best_no_vig_cache["payload"] = payload
+                _best_no_vig_cache["computed_at"] = time.time()
+        except Exception as e:
+            print(f"[vantage] best-no-vig background refresh failed: {e}")
+        time.sleep(BEST_NO_VIG_REFRESH_INTERVAL)
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         print(f"[vantage] {self.address_string()} - {fmt % args}")
@@ -704,56 +811,16 @@ class Handler(BaseHTTPRequestHandler):
     def handle_best_no_vig(self, parsed):
         if not self.require_api_key():
             return
-
-        def one_league(league_id):
-            try:
-                data = fetch_events(
-                    {"leagueID": league_id, "oddsAvailable": "true", "limit": "12"},
-                    cache_ns="markets",
-                    ttl=MARKETS_CACHE_TTL,
-                )
-                items = build_markets(data.get("data") or [])
-                coverage = get_league_coverage_since(league_id)
-                return league_id, items, coverage, None
-            except UpstreamError as e:
-                return league_id, [], None, e.message
-
-        coverage_map = {}
-        errors = {}
-        per_league_ranked = {}
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(BEST_NO_VIG_MAX_WORKERS, len(ALL_LEAGUES))) as pool:
-            for league_id, items, coverage, error in pool.map(one_league, ALL_LEAGUES):
-                if coverage:
-                    coverage_map[league_id] = coverage
-                if error:
-                    errors[league_id] = error
-                # Edge is only meaningful with a real fair-odds comparison, and
-                # only a positive one is "value" at all. The upper cap excludes
-                # ultra-rare props (e.g. "Triples Over 0.5") where a thin,
-                # illiquid market can show a nonsensical multi-hundred-percent
-                # "edge" that's a data/liquidity artifact, not a real
-                # opportunity -- genuine sportsbook mispricing essentially
-                # never exceeds this range.
-                ranked = [i for i in items if i.get("edgePct") is not None and 0 < i["edgePct"] <= BEST_NO_VIG_MAX_EDGE_PCT]
-                ranked.sort(key=lambda i: i["edgePct"], reverse=True)
-                per_league_ranked[league_id] = ranked
-
-        # Take each league's own top slice first so one high-volume league
-        # (MLB has 10x+ the props of the others) can't flood out the rest --
-        # "across sports" should actually mean across sports.
-        per_league_slice = max(1, BEST_NO_VIG_TOP_N // len(ALL_LEAGUES))
-        candidates = []
-        for league_id in ALL_LEAGUES:
-            candidates.extend(per_league_ranked.get(league_id, [])[:per_league_slice])
-        candidates.sort(key=lambda i: i["edgePct"], reverse=True)
-        top = candidates[:BEST_NO_VIG_TOP_N]
-
-        self.send_json(200, {
-            "success": True,
-            "items": top,
-            "coverageSince": coverage_map,
-            "leagueErrors": errors or None,
-        })
+        with _best_no_vig_lock:
+            payload = _best_no_vig_cache["payload"]
+        if payload is None:
+            # First hit before the background refresh loop has completed its
+            # first cycle -- compute inline so the request isn't left hanging.
+            payload = compute_best_no_vig()
+            with _best_no_vig_lock:
+                _best_no_vig_cache["payload"] = payload
+                _best_no_vig_cache["computed_at"] = time.time()
+        self.send_json(200, payload)
 
     def handle_game_log(self, parsed):
         if not self.require_api_key():
@@ -851,6 +918,8 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     if not API_KEY:
         print("[vantage] WARNING: SPORTSGAMEODDS_API_KEY not found in environment or .env file.")
+    else:
+        threading.Thread(target=refresh_best_no_vig_loop, daemon=True).start()
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print(f"[vantage] Serving on http://localhost:{PORT}")
     server.serve_forever()
