@@ -35,6 +35,7 @@
 
     <nav class="view-tabs">
       <button class="view-tab active" id="view-tab-markets" data-view="markets">Markets</button>
+      <button class="view-tab" id="view-tab-novig" data-view="novig">Best No-Vig</button>
       <button class="view-tab" id="view-tab-mlb" data-view="mlb">MLB Matchups</button>
     </nav>
 
@@ -44,7 +45,6 @@
       <section class="stats-row" id="stats-row"></section>
 
       <section class="controls-row">
-        <div class="category-chips" id="category-chips"></div>
         <div class="controls-right">
           <div class="sort-wrap">
             <label for="league-select">League</label>
@@ -68,10 +68,23 @@
         </div>
       </section>
 
+      <section class="controls-row">
+        <div class="category-chips" id="category-chips"></div>
+      </section>
+
       <main>
         <div class="card-grid" id="card-grid"></div>
         <p class="empty-state" id="empty-state" hidden>No live markets match your filters.</p>
       </main>
+    </div>
+
+    <div id="novig-view" hidden>
+      <section class="controls-row">
+        <p class="mlb-subtitle" style="margin:0;">Top no-vig value edges across NFL, NBA, MLB, and NHL — ranked by edge vs. fair odds, refreshed automatically.</p>
+        <button class="chip-btn" id="novig-refresh">Refresh now</button>
+      </section>
+      <div class="card-grid" id="novig-grid"></div>
+      <p class="empty-state" id="novig-empty" hidden>No ranked edges found right now.</p>
     </div>
 
     <div id="mlb-matchups-view" hidden>

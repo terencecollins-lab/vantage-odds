@@ -17,13 +17,27 @@ export function formatAmerican(americanStr) {
   return n > 0 ? `+${n}` : `${n}`;
 }
 
-export async function fetchLiveItems(leagueID) {
+export async function fetchMarketsRaw(leagueID) {
   const res = await fetch(`/api/markets?league=${encodeURIComponent(leagueID)}`);
   const json = await res.json();
   if (!res.ok || json.success === false) {
     throw new Error(json.error || `Request failed (${res.status})`);
   }
+  return json; // { success, items, coverageSince }
+}
+
+export async function fetchLiveItems(leagueID) {
+  const json = await fetchMarketsRaw(leagueID);
   return json.items;
+}
+
+export async function fetchBestNoVig() {
+  const res = await fetch('/api/best-no-vig');
+  const json = await res.json();
+  if (!res.ok || json.success === false) {
+    throw new Error(json.error || `Request failed (${res.status})`);
+  }
+  return json; // { items, coverageSince: {league: iso}, leagueErrors }
 }
 
 export async function fetchGameLog({ league, teamID, playerID, statID, opponentTeamID }) {

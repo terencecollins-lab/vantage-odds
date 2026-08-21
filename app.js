@@ -1,4 +1,4 @@
-import { LEAGUES, MARKET_TYPES, fetchLiveItems, fetchGameLog, formatAmerican } from './odds.js';
+import { LEAGUES, MARKET_TYPES, fetchLiveItems, fetchMarketsRaw, fetchBestNoVig, fetchGameLog, formatAmerican } from './odds.js';
 import { SAMPLE_ITEMS } from './sample-odds.js';
 import { fetchMlbGames, fetchMlbMatchup } from './mlb.js';
 
@@ -15,6 +15,7 @@ const state = {
   watchlistOnly: false,
   watchlist: new Set(JSON.parse(localStorage.getItem(WATCHLIST_KEY) || '[]')),
   items: [],
+  coverageSince: {},
   usingFallback: false,
   loading: true,
   view: 'markets',
@@ -23,6 +24,10 @@ const state = {
   mlbLoading: false,
   mlbError: null,
   mlbData: null,
+  noVigItems: [],
+  noVigLoading: false,
+  noVigError: null,
+  noVigTimer: null,
 };
 
 const el = {
@@ -43,10 +48,15 @@ const el = {
   statusBanner: document.getElementById('status-banner'),
   viewTabMarkets: document.getElementById('view-tab-markets'),
   viewTabMlb: document.getElementById('view-tab-mlb'),
+  viewTabNoVig: document.getElementById('view-tab-novig'),
   marketsView: document.getElementById('markets-view'),
   mlbView: document.getElementById('mlb-matchups-view'),
+  noVigView: document.getElementById('novig-view'),
   mlbGameSelect: document.getElementById('mlb-game-select'),
   mlbMatchupContent: document.getElementById('mlb-matchup-content'),
+  noVigGrid: document.getElementById('novig-grid'),
+  noVigEmpty: document.getElementById('novig-empty'),
+  noVigRefresh: document.getElementById('novig-refresh'),
 };
 
 function starIcon(active) {
@@ -84,8 +94,10 @@ async function loadItems() {
   state.loading = true;
   render();
   try {
-    const items = await fetchLiveItems(state.league);
+    const raw = await fetchMarketsRaw(state.league);
+    const items = raw.items;
     state.items = items;
+    state.coverageSince[state.league] = raw.coverageSince;
     state.usingFallback = false;
     if (items.length === 0) {
       showBanner(`No live markets with bookmaker odds returned for ${state.league} right now. Showing sample data instead.`);
@@ -217,9 +229,17 @@ function renderStatTypeSelect() {
   }
 }
 
+function formatCoverageSince(iso) {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toLocaleDateString(undefined, { month: 'short', year: 'numeric' });
+}
+
 function renderCard(item) {
   const isWatched = state.watchlist.has(item.id);
   const arrow = movementArrow(item.openBookOdds, item.bestPrice);
+  const coverageLabel = item.statID ? formatCoverageSince(state.coverageSince[item.league]) : null;
   return `<article class="item-card" data-id="${item.id}">
     <button class="star-btn ${isWatched ? 'active' : ''}" data-star="${item.id}" title="Toggle watchlist">${starIcon(isWatched)}</button>
     <div class="card-top">
@@ -227,7 +247,7 @@ function renderCard(item) {
       ${item.isOutlier ? '<span class="outlier-badge">Value edge</span>' : ''}
     </div>
     <div class="item-name">${item.name}</div>
-    <div class="rating-row">${formatKickoff(item.startsAt)}</div>
+    <div class="rating-row">${formatKickoff(item.startsAt)} ${coverageLabel ? `<span class="coverage-badge" title="Earliest finalized-game history SportsGameOdds has for ${item.league} — used for the recent-form stats below">History since ${coverageLabel}</span>` : ''}</div>
     <div class="movement-row">${item.openBookOdds ? `Opened ${formatAmerican(item.openBookOdds)} → Now ${formatAmerican(item.bestPrice)} ${arrow}` : ''}</div>
     <div class="price-row">
       <span class="best-price">${formatAmerican(item.bestPrice)}</span>
@@ -235,26 +255,31 @@ function renderCard(item) {
       ${item.edgePct != null ? `<span class="savings-pct">${item.edgePct >= 0 ? '+' : ''}${item.edgePct}%</span>` : ''}
     </div>
     <div class="vendor-row"><span>Best at</span><span class="vendor-name">${item.bestVendor}</span></div>
+    ${item.noVigProb != null ? `<div class="vendor-row"><span>No-vig</span><span>${item.noVigProb}%</span></div>` : ''}
   </article>`;
+}
+
+function bindCardEvents(container) {
+  container.querySelectorAll('.star-btn').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggleWatchlist(btn.dataset.star);
+    });
+  });
+  container.querySelectorAll('.item-card').forEach((card) => {
+    card.addEventListener('click', () => openModal(card.dataset.id));
+  });
 }
 
 function renderGrid() {
   const items = getFilteredItems();
   el.empty.hidden = items.length !== 0 || state.loading;
   el.grid.innerHTML = state.loading ? '<p class="empty-state">Loading live odds…</p>' : items.map(renderCard).join('');
-  el.grid.querySelectorAll('.star-btn').forEach((btn) => {
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      toggleWatchlist(btn.dataset.star);
-    });
-  });
-  el.grid.querySelectorAll('.item-card').forEach((card) => {
-    card.addEventListener('click', () => openModal(card.dataset.id));
-  });
+  bindCardEvents(el.grid);
 }
 
 function openModal(id) {
-  const item = state.items.find((i) => i.id === id);
+  const item = state.items.find((i) => i.id === id) || state.noVigItems.find((i) => i.id === id);
   if (!item) return;
   const isWatched = state.watchlist.has(item.id);
   const hasAnyLine = item.bookmakers.some((b) => b.line != null);
@@ -518,19 +543,74 @@ async function loadMlbMatchup() {
   }
 }
 
+const NOVIG_REFRESH_INTERVAL_MS = 30000;
+
+async function loadBestNoVig() {
+  state.noVigLoading = true;
+  state.noVigError = null;
+  renderNoVig();
+  try {
+    const { items, coverageSince } = await fetchBestNoVig();
+    state.noVigItems = items;
+    Object.assign(state.coverageSince, coverageSince || {});
+  } catch (err) {
+    state.noVigError = err.message;
+  }
+  state.noVigLoading = false;
+  renderNoVig();
+}
+
+function renderNoVig() {
+  if (state.noVigLoading && state.noVigItems.length === 0) {
+    el.noVigEmpty.hidden = true;
+    el.noVigGrid.innerHTML = '<p class="empty-state">Scanning all sports for the best no-vig edges…</p>';
+    return;
+  }
+  if (state.noVigError && state.noVigItems.length === 0) {
+    el.noVigEmpty.hidden = true;
+    el.noVigGrid.innerHTML = `<p class="empty-state">Could not load cross-sport edges (${state.noVigError}).</p>`;
+    return;
+  }
+  el.noVigEmpty.hidden = state.noVigItems.length !== 0;
+  el.noVigGrid.innerHTML = state.noVigItems.map(renderCard).join('');
+  bindCardEvents(el.noVigGrid);
+}
+
+function startNoVigAutoRefresh() {
+  stopNoVigAutoRefresh();
+  state.noVigTimer = setInterval(loadBestNoVig, NOVIG_REFRESH_INTERVAL_MS);
+}
+
+function stopNoVigAutoRefresh() {
+  if (state.noVigTimer) {
+    clearInterval(state.noVigTimer);
+    state.noVigTimer = null;
+  }
+}
+
 function setView(view) {
   state.view = view;
   el.viewTabMarkets.classList.toggle('active', view === 'markets');
   el.viewTabMlb.classList.toggle('active', view === 'mlb');
+  el.viewTabNoVig.classList.toggle('active', view === 'novig');
   el.marketsView.hidden = view !== 'markets';
   el.mlbView.hidden = view !== 'mlb';
+  el.noVigView.hidden = view !== 'novig';
   if (view === 'mlb' && state.mlbGames.length === 0) {
     loadMlbGames();
+  }
+  if (view === 'novig') {
+    if (state.noVigItems.length === 0) loadBestNoVig();
+    startNoVigAutoRefresh();
+  } else {
+    stopNoVigAutoRefresh();
   }
 }
 
 el.viewTabMarkets.addEventListener('click', () => setView('markets'));
 el.viewTabMlb.addEventListener('click', () => setView('mlb'));
+el.viewTabNoVig.addEventListener('click', () => setView('novig'));
+el.noVigRefresh.addEventListener('click', () => loadBestNoVig());
 el.mlbGameSelect.addEventListener('change', () => {
   state.mlbSelectedGameKey = el.mlbGameSelect.value;
   loadMlbMatchup();
