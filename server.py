@@ -9,6 +9,7 @@ import datetime
 import json
 import os
 import re
+import subprocess
 import threading
 import time
 import urllib.error
@@ -687,6 +688,211 @@ def build_mlb_matchup(home_team_id, away_team_id, game_date):
     }
 
 
+ESPN_GOLF_SCOREBOARD = "https://site.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard"
+ESPN_GOLF_LEADERBOARD = "https://site.api.espn.com/apis/site/v2/sports/golf/leaderboard"
+GOLF_LIVE_CACHE_TTL = 60
+GOLF_SEASON_CACHE_TTL = 24 * 60 * 60
+GOLF_FINAL_EVENT_CACHE_TTL = 30 * 24 * 60 * 60  # a finished tournament's result never changes
+
+# The 7 recurring PGA Tour events this feature tracks under-par history for.
+# Sponsor names change year to year (Black Desert Championship -> Bank of
+# Utah Championship, Zozo Championship -> Baycurrent Classic), so each entry
+# lists every name the event has gone by rather than assuming one fixed title.
+GOLF_HISTORY_TOURNAMENTS = [
+    {"key": "bmw_championship", "label": "BMW Championship", "aliases": ["bmw championship"]},
+    {"key": "tour_championship", "label": "Tour Championship", "aliases": ["tour championship"]},
+    {"key": "bank_of_utah", "label": "Bank of Utah Championship", "aliases": ["bank of utah championship", "black desert championship"]},
+    {"key": "baycurrent_zozo", "label": "Baycurrent Classic (Zozo)", "aliases": ["baycurrent classic", "zozo championship"]},
+    {"key": "mexico_open", "label": "Mexico Open", "aliases": ["mexico open"]},
+    {"key": "wwt_championship", "label": "World Wide Technology Championship", "aliases": ["world wide technology championship"]},
+    {"key": "rsm_classic", "label": "RSM Classic", "aliases": ["rsm classic"]},
+]
+GOLF_HISTORY_YEARS = [2021, 2022, 2023, 2024, 2025]
+
+
+def _fetch_espn_json(url, cache_ns, ttl):
+    """Generic fetcher for ESPN's public (unofficial, undocumented but
+    unauthenticated) golf scoreboard/leaderboard endpoints.
+
+    Akamai (fronting espn.com) fingerprints and blocks Python's own TLS/
+    urllib stack outright -- even with a spoofed browser User-Agent header,
+    every request came back an Akamai "Access Denied" page. Plain `curl`
+    against the identical URL from the same machine went through with no
+    special headers at all, so this shells out to curl (curl's TLS
+    fingerprint isn't the one Akamai is blocking) rather than fighting
+    urllib's fingerprint from inside Python."""
+    cache_key = f"{cache_ns}:{url}"
+    cached = _cache.get(cache_key)
+    if cached and cached[0] > time.time():
+        return cached[1]
+
+    try:
+        result = subprocess.run(
+            ["curl", "-s", "--max-time", "15", url],
+            capture_output=True, timeout=20,
+        )
+    except (subprocess.SubprocessError, OSError) as e:
+        raise UpstreamError(502, f"Could not reach ESPN: {e}")
+    if result.returncode != 0:
+        raise UpstreamError(502, f"curl failed reaching ESPN (exit {result.returncode}): {result.stderr.decode('utf-8', 'replace')}")
+
+    try:
+        parsed = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        raise UpstreamError(502, "ESPN returned a non-JSON response")
+
+    _cache_set(cache_key, ttl, parsed)
+    return parsed
+
+
+def get_pga_season_schedule(year):
+    """Every PGA Tour event in a season, with its ESPN event id -- lets us
+    look a specific recurring tournament's id up by name/year instead of
+    hand-maintaining a list (ESPN doesn't publish one)."""
+    data = _fetch_espn_json(f"{ESPN_GOLF_SCOREBOARD}?dates={year}", cache_ns="golf_season", ttl=GOLF_SEASON_CACHE_TTL)
+    return [{"id": e.get("id"), "name": e.get("name") or "", "date": e.get("date")} for e in data.get("events") or []]
+
+
+def find_golf_event(year, aliases):
+    for event in get_pga_season_schedule(year):
+        name_lower = event["name"].lower()
+        if any(alias in name_lower for alias in aliases):
+            return event
+    return None
+
+
+def _parse_relative_to_par(display_value):
+    if display_value is None:
+        return None
+    display_value = display_value.strip()
+    if display_value in ("E", ""):
+        return 0
+    try:
+        return int(display_value)
+    except ValueError:
+        return None
+
+
+def parse_golf_event(raw):
+    events = raw.get("events") or []
+    if not events:
+        return None
+    event = events[0]
+    competition = (event.get("competitions") or [{}])[0]
+    status = ((competition.get("status") or {}).get("type") or {}).get("description")
+    is_final = ((competition.get("status") or {}).get("type") or {}).get("completed") is True
+
+    players = []
+    for c in competition.get("competitors") or []:
+        athlete = c.get("athlete") or {}
+        rounds = []
+        for ls in c.get("linescores") or []:
+            strokes = ls.get("value")
+            relative = _parse_relative_to_par(ls.get("displayValue"))
+            if strokes is None or relative is None:
+                continue
+            par = strokes - relative
+            rounds.append({"round": ls.get("period"), "strokes": strokes, "par": par, "underPar": strokes < par})
+        under_par_rounds = [r["strokes"] for r in rounds if r["underPar"]]
+        score = c.get("score")
+        total_display = score.get("displayValue") if isinstance(score, dict) else score
+        players.append({
+            "athleteId": athlete.get("id"),
+            "name": athlete.get("displayName"),
+            "total": total_display,
+            "rounds": rounds,
+            "anyRoundUnderPar": len(under_par_rounds) > 0,
+            "lowestRound": min(under_par_rounds) if under_par_rounds else (min((r["strokes"] for r in rounds), default=None)),
+        })
+
+    return {
+        "eventId": event.get("id"),
+        "name": event.get("name"),
+        "date": event.get("date"),
+        "status": status,
+        "isFinal": is_final,
+        "players": players,
+    }
+
+
+def get_golf_event(event_id):
+    # Cache namespace deliberately excludes status -- a finished event is
+    # fetched once and kept essentially forever; an in-progress one is
+    # re-fetched every GOLF_LIVE_CACHE_TTL seconds regardless of which cache
+    # key answered last time, since we don't know completion status until
+    # after the fetch.
+    cache_key = f"golf_event_parsed:{event_id}"
+    cached = _cache.get(cache_key)
+    if cached and cached[0] > time.time():
+        return cached[1]
+    raw = _fetch_espn_json(f"{ESPN_GOLF_LEADERBOARD}?event={event_id}", cache_ns="golf_event_raw", ttl=GOLF_LIVE_CACHE_TTL)
+    parsed = parse_golf_event(raw)
+    ttl = GOLF_FINAL_EVENT_CACHE_TTL if (parsed and parsed["isFinal"]) else GOLF_LIVE_CACHE_TTL
+    _cache_set(cache_key, ttl, parsed)
+    return parsed
+
+
+def get_golf_history_index(tournament):
+    """athleteId -> best historical under-par appearance for this tournament
+    family, scanned across GOLF_HISTORY_YEARS. Each year's event lookup and
+    leaderboard fetch is independently cached (long TTL, since finished
+    results never change), so this is only ever slow on the very first call."""
+    index = {}
+    for year in GOLF_HISTORY_YEARS:
+        event = find_golf_event(year, tournament["aliases"])
+        if not event or not event["id"]:
+            continue
+        try:
+            parsed = get_golf_event(event["id"])
+        except UpstreamError:
+            continue
+        if not parsed:
+            continue
+        for p in parsed["players"]:
+            if not p["athleteId"] or not p["anyRoundUnderPar"]:
+                continue
+            existing = index.get(p["athleteId"])
+            if not existing or (p["lowestRound"] or 999) < (existing["lowestRound"] or 999):
+                index[p["athleteId"]] = {"year": year, "lowestRound": p["lowestRound"]}
+    return index
+
+
+def compute_golf_view():
+    live_raw = _fetch_espn_json(ESPN_GOLF_SCOREBOARD, cache_ns="golf_live", ttl=GOLF_LIVE_CACHE_TTL)
+    live_events = live_raw.get("events") or []
+    if not live_events:
+        return {"success": True, "tournament": None, "leaderboard": [], "historyTournament": None}
+
+    live_id = live_events[0].get("id")
+    current = get_golf_event(live_id)
+    if not current:
+        return {"success": True, "tournament": None, "leaderboard": [], "historyTournament": None}
+
+    name_lower = (current["name"] or "").lower()
+    tournament_family = next(
+        (t for t in GOLF_HISTORY_TOURNAMENTS if any(alias in name_lower for alias in t["aliases"])),
+        None,
+    )
+    history_index = get_golf_history_index(tournament_family) if tournament_family else {}
+
+    leaderboard = []
+    for p in current["players"]:
+        hist = history_index.get(p["athleteId"])
+        leaderboard.append({
+            **p,
+            "historicalUnderPar": hist is not None,
+            "historicalBestRound": hist["lowestRound"] if hist else None,
+            "historicalYear": hist["year"] if hist else None,
+        })
+
+    return {
+        "success": True,
+        "tournament": {"name": current["name"], "date": current["date"], "status": current["status"]},
+        "leaderboard": leaderboard,
+        "historyTournament": tournament_family["label"] if tournament_family else None,
+    }
+
+
 def compute_best_no_vig():
     # Take each league's own top slice so one high-volume league (MLB has
     # 10x+ the props of the others) can't flood out the rest -- "across
@@ -767,6 +973,22 @@ def refresh_best_no_vig_loop():
         time.sleep(BEST_NO_VIG_REFRESH_INTERVAL)
 
 
+_golf_lock = threading.Lock()
+_golf_cache = {"payload": None}
+GOLF_REFRESH_INTERVAL = 90  # live scores don't need to update faster than this
+
+
+def refresh_golf_loop():
+    while True:
+        try:
+            payload = compute_golf_view()
+            with _golf_lock:
+                _golf_cache["payload"] = payload
+        except Exception as e:
+            print(f"[vantage] golf background refresh failed: {e}")
+        time.sleep(GOLF_REFRESH_INTERVAL)
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         print(f"[vantage] {self.address_string()} - {fmt % args}")
@@ -781,6 +1003,8 @@ class Handler(BaseHTTPRequestHandler):
             self.handle_mlb_matchups(parsed)
         elif parsed.path == "/api/best-no-vig":
             self.handle_best_no_vig(parsed)
+        elif parsed.path == "/api/golf":
+            self.handle_golf(parsed)
         else:
             self.handle_static(parsed)
 
@@ -821,6 +1045,14 @@ class Handler(BaseHTTPRequestHandler):
             # already polls this endpoint every 30s, so it'll pick up the
             # real result on its own shortly.
             self.send_json(200, {"success": True, "items": [], "coverageSince": {}, "preparing": True})
+            return
+        self.send_json(200, payload)
+
+    def handle_golf(self, parsed):
+        with _golf_lock:
+            payload = _golf_cache["payload"]
+        if payload is None:
+            self.send_json(200, {"success": True, "tournament": None, "leaderboard": [], "historyTournament": None, "preparing": True})
             return
         self.send_json(200, payload)
 
@@ -922,6 +1154,7 @@ if __name__ == "__main__":
         print("[vantage] WARNING: SPORTSGAMEODDS_API_KEY not found in environment or .env file.")
     else:
         threading.Thread(target=refresh_best_no_vig_loop, daemon=True).start()
+    threading.Thread(target=refresh_golf_loop, daemon=True).start()
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print(f"[vantage] Serving on http://localhost:{PORT}")
     server.serve_forever()
