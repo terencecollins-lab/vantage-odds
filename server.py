@@ -5,6 +5,7 @@ lives only here, never reaching the browser or any client app.
 """
 
 import concurrent.futures
+import datetime
 import json
 import os
 import re
@@ -20,6 +21,7 @@ UPSTREAM_BASE = "https://api.sportsgameodds.com/v2"
 MARKETS_CACHE_TTL = 20
 GAME_LOG_CACHE_TTL = 24 * 60 * 60  # finalized games don't change
 GAME_LOG_MAX_PAGES = 12  # 12 * 50 = 600 events, well beyond ~2.5 seasons for any league
+COVERAGE_CACHE_TTL = 7 * 24 * 60 * 60  # this floor essentially never moves
 
 MLB_STATS_BASE = "https://statsapi.mlb.com/api/v1"
 MLB_SCHEDULE_CACHE_TTL = 2 * 60 * 60  # probable pitchers can be announced/updated
@@ -176,6 +178,81 @@ def fetch_all_events(params, cache_ns, ttl, max_pages=GAME_LOG_MAX_PAGES):
 
     _cache[cache_key] = (time.time() + ttl, all_events)
     return all_events
+
+
+def fetch_all_events_windowed(params, cache_ns, ttl, earliest_iso, window_days=30, max_workers=20):
+    """Team-scoped variant of fetch_all_events that fans out across date
+    windows in parallel instead of walking the cursor sequentially one page
+    at a time. Cursor pagination can't be parallelized (each page's cursor
+    depends on the previous response), but independent date ranges can --
+    for a high-volume league (MLB especially) walking 10+ pages one at a
+    time was slow enough to occasionally get cut off before finishing."""
+    query = urllib.parse.urlencode(params)
+    cache_key = f"{cache_ns}:windowed:{query}"
+    cached = _cache.get(cache_key)
+    if cached and cached[0] > time.time():
+        return cached[1]
+
+    try:
+        start = datetime.datetime.fromisoformat(earliest_iso.replace("Z", "+00:00"))
+    except (ValueError, AttributeError, TypeError):
+        start = datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc)
+    end = datetime.datetime.now(datetime.timezone.utc)
+
+    windows = []
+    cursor_dt = start
+    while cursor_dt < end:
+        window_end = min(cursor_dt + datetime.timedelta(days=window_days), end)
+        windows.append((cursor_dt, window_end))
+        cursor_dt = window_end
+
+    def fetch_window(bounds):
+        w_start, w_end = bounds
+        window_params = dict(params)
+        window_params["startsAfter"] = w_start.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        window_params["startsBefore"] = w_end.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        events = []
+        cursor = None
+        for _ in range(3):  # a single team in one ~month window shouldn't need more
+            page_params = dict(window_params)
+            if cursor:
+                page_params["cursor"] = cursor
+            page = _get_json(f"{UPSTREAM_BASE}/events?{urllib.parse.urlencode(page_params)}")
+            events.extend(page.get("data") or [])
+            cursor = page.get("nextCursor")
+            if not cursor:
+                break
+        return events
+
+    all_events = []
+    if windows:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+            for events in pool.map(fetch_window, windows):
+                all_events.extend(events)
+
+    _cache[cache_key] = (time.time() + ttl, all_events)
+    return all_events
+
+
+def get_league_coverage_since(league_id):
+    """True earliest finalized-game date SportsGameOdds has for this league --
+    events come back ascending by date when no teamID is given, so a handful
+    of pages is enough to find the real floor rather than one team's own."""
+    cache_key = f"coverage:{league_id}"
+    cached = _cache.get(cache_key)
+    if cached and cached[0] > time.time():
+        return cached[1]
+    events = fetch_all_events(
+        {"leagueID": league_id, "finalized": "true", "limit": "50"},
+        cache_ns="coverage_scan",
+        ttl=COVERAGE_CACHE_TTL,
+        max_pages=4,
+    )
+    dates = [(e.get("status") or {}).get("startsAt") for e in events]
+    dates = [d for d in dates if d]
+    earliest = min(dates) if dates else None
+    _cache[cache_key] = (time.time() + COVERAGE_CACHE_TTL, earliest)
+    return earliest
 
 
 def bookmaker_label(key):
@@ -590,7 +667,8 @@ class Handler(BaseHTTPRequestHandler):
                 ttl=MARKETS_CACHE_TTL,
             )
             items = build_markets(data.get("data") or [])
-            self.send_json(200, {"success": True, "items": items})
+            coverage_since = get_league_coverage_since(league_id)
+            self.send_json(200, {"success": True, "items": items, "coverageSince": coverage_since})
         except UpstreamError as e:
             self.send_json(e.status if e.status < 600 else 502, {"success": False, "error": e.message})
 
@@ -616,10 +694,12 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         try:
-            events = fetch_all_events(
+            earliest = get_league_coverage_since(league_id)
+            events = fetch_all_events_windowed(
                 {"leagueID": league_id, "teamID": team_id, "finalized": "true", "limit": "50"},
                 cache_ns="gamelog",
                 ttl=GAME_LOG_CACHE_TTL,
+                earliest_iso=earliest,
             )
             result = build_game_log(events, player_id, stat_id, team_id, opponent_team_id)
             self.send_json(200, {"success": True, **result})
