@@ -389,7 +389,8 @@ function formGuideDots(games, item, cap = 20) {
 function hitRateLabel(games, item) {
   if (!games.length) return '—';
   const hits = games.filter((g) => isHit(item, g.statValue)).length;
-  return `${hits}/${games.length}`;
+  const pct = Math.round((hits / games.length) * 100);
+  return `${hits}/${games.length} (${pct}%)`;
 }
 
 function recentFormCaption(item) {
