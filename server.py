@@ -8,6 +8,7 @@ import concurrent.futures
 import datetime
 import hashlib
 import hmac
+import html
 import json
 import os
 import re
@@ -691,6 +692,394 @@ def build_mlb_matchup(home_team_id, away_team_id, game_date):
     }
 
 
+# =====================================================================
+# KBO batter-vs-opponent matchups (mykbostats.com)
+# =====================================================================
+# Unlike the MLB matchup feature above, there's no public KBO stats API --
+# this scrapes mykbostats.com, a fan-run site. Two structural differences
+# from the MLB approach follow directly from that:
+#
+# 1. NEW DEPENDENCY: mykbostats.com 403s plain urllib/requests calls (basic
+#    bot-protection) -- a bare request works for MLB's Stats API but not
+#    here. `cloudscraper` gets past it (see requirements.txt). This is the
+#    one exception to this file's stdlib-only design; everything else below
+#    (HTML table extraction) is still hand-rolled with `re` rather than
+#    adding BeautifulSoup too, to keep the new dependency surface as small
+#    as this genuinely requires.
+# 2. NO PER-PITCHER SPLITS: mykbostats.com has no batter-vs-specific-pitcher
+#    data (confirmed by hand during manual research -- koreabaseball.com
+#    blocks bots outright, Statiz.co.kr is JS-only, and mykbostats itself
+#    only tracks batter-vs-TEAM splits). So this feature is *only*
+#    "batters vs. opponent team", built the same way as the matching tab in
+#    the KBO Excel workbook tool: pull each batter's own season game log and
+#    sum the games played against that specific opponent. There's no
+#    "vs. today's probable starter" version to build here, structurally.
+#
+# This also means, unlike MLB's live probable-pitcher lookup, there's no
+# same-day freshness requirement -- each batter's own page already carries
+# whatever games mykbostats has logged for them, updated on their own
+# schedule. No play-by-play reconstruction happens here (that's a manual/
+# judgment step for building one specific day's spreadsheet, not something
+# this always-on endpoint attempts) -- so a batter's very latest game may or
+# may not be reflected yet, same staleness tradeoff as any other stats
+# source that isn't hand-verified.
+
+MYKBO_BASE = "https://mykbostats.com"
+KBO_ROSTER_CACHE_TTL = 26 * 60 * 60
+# 26h, not the on-demand default of 6h -- once the once-daily pre-warm job
+# (below, timed for right after games finish) is populating this cache on
+# its own schedule, the TTL needs to comfortably outlive the ~24h gap
+# between cycles (plus the cycle's own runtime) or entries would expire and
+# fall back to live on-demand fetches during the day anyway, defeating the
+# point.
+KBO_GAMELOG_CACHE_TTL = 26 * 60 * 60
+
+# team display name (as it appears in SportsGameOdds' KBO matchup strings)
+# -> mykbostats.com numeric team id + URL slug + the 2-3 letter "Opp" code
+# mykbostats uses in a batter's own game log to mark who they played.
+# IDs/slugs confirmed by hand against mykbostats.com; if a team's slug ever
+# changes there this mapping will need a one-line update.
+KBO_TEAM_ROSTER = {
+    "Kia Tigers":      {"id": 5,  "slug": "Kia-Tigers",      "oppCode": "KIA"},
+    "Kiwoom Heroes":   {"id": 23, "slug": "Kiwoom-Heroes",   "oppCode": "KIW"},
+    "KT Wiz":          {"id": 22, "slug": "KT-Wiz",          "oppCode": "KT"},
+    "SSG Landers":     {"id": 24, "slug": "SSG-Landers",     "oppCode": "SSG"},
+    "LG Twins":        {"id": 6,  "slug": "LG-Twins",        "oppCode": "LG"},
+    "Hanwha Eagles":   {"id": 4,  "slug": "Hanwha-Eagles",   "oppCode": "HAN"},
+    "Lotte Giants":    {"id": 2,  "slug": "Lotte-Giants",    "oppCode": "LOT"},
+    "Doosan Bears":    {"id": 1,  "slug": "Doosan-Bears",    "oppCode": "DOO"},
+    "Samsung Lions":   {"id": 3,  "slug": "Samsung-Lions",   "oppCode": "SAM"},
+    "NC Dinos":        {"id": 9,  "slug": "NC-Dinos",        "oppCode": "NC"},
+}
+
+_kbo_scraper_lock = threading.Lock()
+_kbo_scraper = None
+_kbo_scraper_warmed_up = False
+
+
+def _get_kbo_scraper():
+    """Lazily creates one shared cloudscraper session for the process
+    (mirrors the warm-up-then-reuse pattern that worked in testing -- a
+    bare first request 403s, but visiting the homepage once first to pick
+    up a normal session cookie, then reusing that same session, gets
+    through). Thread-safe since KBO matchup building fans out across a
+    thread pool."""
+    global _kbo_scraper, _kbo_scraper_warmed_up
+    with _kbo_scraper_lock:
+        if _kbo_scraper is None:
+            import cloudscraper
+            _kbo_scraper = cloudscraper.create_scraper()
+        if not _kbo_scraper_warmed_up:
+            _kbo_scraper.get(MYKBO_BASE + "/", timeout=20)
+            _kbo_scraper_warmed_up = True
+        return _kbo_scraper
+
+
+def _fetch_mykbo_html(url, cache_ns, ttl):
+    cache_key = f"{cache_ns}:{url}"
+    cached = _cache.get(cache_key)
+    if cached and cached[0] > time.time():
+        return cached[1]
+
+    scraper = _get_kbo_scraper()
+    resp = scraper.get(url, timeout=20)
+    # 403 = the bot-protection challenge itself; 429 = we're past that but
+    # mykbostats' own rate limiter kicked in (seen in testing when switching
+    # between several different games in quick succession, each pulling a
+    # fresh roster + ~9-13 player pages). A single retry wasn't always
+    # enough during heavy back-to-back testing across many different teams,
+    # so 429 gets two retries with increasing backoff (a fresh team's ~10
+    # player pages can still be mid-flight on other threads when the first
+    # retry lands); 403 keeps its original single retry since that's a one-
+    # time challenge, not an ongoing rate window.
+    if resp.status_code == 403:
+        time.sleep(3)
+        resp = scraper.get(url, timeout=20)
+    elif resp.status_code == 429:
+        for backoff in (8, 15):
+            time.sleep(backoff)
+            resp = scraper.get(url, timeout=20)
+            if resp.status_code != 429:
+                break
+    if resp.status_code != 200:
+        raise UpstreamError(resp.status_code, f"mykbostats.com returned {resp.status_code} for {url}")
+
+    html_text = resp.text
+    _cache_set(cache_key, ttl, html_text)
+    return html_text
+
+
+def _strip_tags(cell_html):
+    """Cell text with any nested tags removed and HTML entities decoded --
+    good enough for mykbostats' fairly plain table cells (no nested tables,
+    just occasional links/spans around plain text)."""
+    text = re.sub(r"<[^>]+>", "", cell_html)
+    return html.unescape(text).strip()
+
+
+def _find_table_by_header_substrings(page_html, required_substrings):
+    """Hand-rolled substitute for BeautifulSoup's find-table-by-header-text
+    (see kbo_scraper.py's identically-named helper, which this mirrors).
+    Scans each <table>...</table> block, and returns the first one whose
+    <th> row contains every required substring (case-insensitive). Returns
+    the raw HTML of that table, or None."""
+    for match in re.finditer(r"<table\b.*?</table>", page_html, re.DOTALL | re.IGNORECASE):
+        table_html = match.group(0)
+        headers = " | ".join(_strip_tags(h) for h in re.findall(r"<th\b.*?</th>", table_html, re.DOTALL | re.IGNORECASE))
+        if all(s.upper() in headers.upper() for s in required_substrings):
+            return table_html
+    return None
+
+
+def _table_rows(table_html):
+    """<table html> -> list of lists of cell text, one list per <tr>
+    (header row included as the first entry)."""
+    rows = []
+    for tr_match in re.finditer(r"<tr\b.*?</tr>", table_html, re.DOTALL | re.IGNORECASE):
+        tr_html = tr_match.group(0)
+        cells = re.findall(r"<t[hd]\b.*?</t[hd]>", tr_html, re.DOTALL | re.IGNORECASE)
+        if cells:
+            rows.append([_strip_tags(c) for c in cells])
+    return rows
+
+
+def get_kbo_roster(team_name):
+    """team display name -> list of {"id", "fullName"}. Includes every
+    player linked from the roster page, pitchers included -- harmless here
+    since KBO plays with a universal DH, so a pitcher's own game log simply
+    never has any batting rows and will fall out naturally when we filter
+    to players with at-bats against the opponent, no separate pitcher
+    exclusion needed (unlike the MLB roster helper above, which explicitly
+    skips position == "P")."""
+    team = KBO_TEAM_ROSTER.get(team_name)
+    if not team:
+        return []
+    cache_key = f"kbo_roster_parsed:{team_name}"
+    cached = _cache.get(cache_key)
+    if cached and cached[0] > time.time():
+        return cached[1]
+
+    url = f"{MYKBO_BASE}/teams/{team['id']}-{team['slug']}"
+    page_html = _fetch_mykbo_html(url, cache_ns="kbo_roster_html", ttl=KBO_ROSTER_CACHE_TTL)
+
+    seen = {}
+    for m in re.finditer(r'<a[^>]+href="/players/(\d+)[^"]*"[^>]*>([^<]+)</a>', page_html):
+        player_id, name = m.group(1), html.unescape(m.group(2)).strip()
+        if name:
+            seen[player_id] = name
+    roster = [{"id": pid, "fullName": name} for pid, name in seen.items()]
+    _cache_set(cache_key, KBO_ROSTER_CACHE_TTL, roster)
+    return roster
+
+
+def _aggregate_games(games):
+    """list of game dicts -> counting-stat totals, or None if the list is
+    empty (no at-bats in this window -- covers both a batter genuinely
+    having fewer than N games played and pitcher ids that never bat)."""
+    if not games:
+        return None
+    totals = {"atBats": 0, "hits": 0, "runs": 0, "rbi": 0, "homeRuns": 0}
+    for g in games:
+        totals["atBats"] += g["ab"]
+        totals["hits"] += g["h"]
+        totals["runs"] += g["r"]
+        totals["rbi"] += g["rbi"]
+        totals["homeRuns"] += g["hr"]
+    totals["gamesFound"] = len(games)
+    totals["avg"] = round(totals["hits"] / totals["atBats"], 3) if totals["atBats"] else None
+    return totals
+
+
+def _get_kbo_player_games(player_id):
+    """One batter's full logged game list this season, oldest-first (matches
+    mykbostats' own table order) -- the shared raw material both the
+    vs-opponent aggregate and the L5/L10/L20 recent-form aggregates are
+    built from, fetched and parsed once per player regardless of how many
+    different views need it."""
+    cache_key = f"kbo_gamelog_parsed:{player_id}"
+    cached = _cache.get(cache_key)
+    if cached and cached[0] > time.time():
+        return cached[1]
+
+    url = f"{MYKBO_BASE}/players/{player_id}"
+    page_html = _fetch_mykbo_html(url, cache_ns="kbo_player_html", ttl=KBO_GAMELOG_CACHE_TTL)
+    table_html = _find_table_by_header_substrings(page_html, ["DATE", "AB", "RBI"])
+    games = []
+    if table_html:
+        rows = _table_rows(table_html)
+        # mykbostats' own column order, confirmed by hand against many
+        # player pages: Date, Opp, AB, R, H, 2B, 3B, HR, RBI, BB, HBP.
+        # Parsed by fixed position rather than re-matching header text
+        # per row, since that order has been consistent everywhere it's
+        # been checked -- if mykbostats ever reorders these columns,
+        # this needs updating to match (see kbo_scraper.py's equivalent
+        # note).
+        for row in rows[1:]:  # skip header row
+            if len(row) < 9:
+                continue
+            date_str, opp = row[0], row[1]
+            try:
+                ab, r, h, hr, rbi = int(row[2]), int(row[3]), int(row[4]), int(row[7]), int(row[8])
+            except ValueError:
+                continue  # a totals/subtotal row, or a blank cell -- skip
+            games.append({"opp": opp, "ab": ab, "r": r, "h": h, "hr": hr, "rbi": rbi})
+    _cache_set(cache_key, KBO_GAMELOG_CACHE_TTL, games)
+    return games
+
+
+def get_kbo_batter_stats(player_id, opponent_code):
+    """One batter's stats in four views, all built from the same fetched
+    game log: career at-bats against opponent_code (vsOpponent), plus
+    last-5/10/20-games recent form regardless of opponent (mirrors the
+    'Last 5-10-20 Games' tab from the original KBO Excel workbook tool,
+    which was paused there but is a natural fit here since the per-batter
+    game log is already being fetched for the vs-opponent view). Returns
+    None only if every one of the four views comes back empty -- covers a
+    pitcher id that never bats, so it's dropped from the matchup entirely;
+    a real batter who simply hasn't faced this opponent yet still shows up
+    with vsOpponent: None but real L5/L10/L20 data."""
+    games = _get_kbo_player_games(player_id)
+    vs_opponent = _aggregate_games([g for g in games if opponent_code in g["opp"].upper()])
+    # games list is oldest-first, so "last N" is the tail slice.
+    last5 = _aggregate_games(games[-5:])
+    last10 = _aggregate_games(games[-10:])
+    last20 = _aggregate_games(games[-20:])
+    if vs_opponent is None and last5 is None and last10 is None and last20 is None:
+        return None
+    return {"vsOpponent": vs_opponent, "last5": last5, "last10": last10, "last20": last20}
+
+
+def _resolve_kbo_team(name):
+    """Exact match first, then case-insensitive, then substring, since
+    there's no confirmed guarantee that SportsGameOdds' KBO team display
+    strings (used to discover today's games) exactly match mykbostats.com's
+    own naming -- this hasn't been tested against SportsGameOdds' actual
+    KBO output. If this raises, the error message includes the exact string
+    that failed to match so a naming mismatch is fast to spot and fix by
+    adding an alias to KBO_TEAM_ROSTER."""
+    if name in KBO_TEAM_ROSTER:
+        return name, KBO_TEAM_ROSTER[name]
+    lname = name.lower()
+    for key, team in KBO_TEAM_ROSTER.items():
+        if key.lower() == lname:
+            return key, team
+    for key, team in KBO_TEAM_ROSTER.items():
+        if key.lower() in lname or lname in key.lower():
+            return key, team
+    raise UpstreamError(400, f"Unrecognized KBO team name from odds feed: '{name}' -- doesn't match any key in KBO_TEAM_ROSTER, even loosely. Add an alias there.")
+
+
+def build_kbo_matchup(home_team, away_team):
+    home_team, home = _resolve_kbo_team(home_team)
+    away_team, away = _resolve_kbo_team(away_team)
+
+    def fetch_one(p, opponent_code):
+        # A small fixed stagger before each request, on top of the small
+        # worker pool below -- seen in testing: switching between several
+        # different KBO games in quick succession (each needing a fresh
+        # roster + ~9-13 uncached player pages) was enough to trip
+        # mykbostats' own 429 rate limit, separate from the 403 bot-check
+        # cloudscraper already handles. This trades a bit of latency for
+        # reliability against a small fan-run site that was never built to
+        # take bursty concurrent traffic.
+        time.sleep(0.3)
+        return p, get_kbo_batter_stats(p["id"], opponent_code)
+
+    def side_batters(roster_team_name, opponent_code):
+        roster = get_kbo_roster(roster_team_name)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda p: fetch_one(p, opponent_code), roster))
+        rows = [{**p, "stats": s} for p, s in results if s is not None]
+        # vsOpponent can now legitimately be None for a real batter who just
+        # hasn't faced this team yet (they'd still have L5/L10/L20 data) --
+        # sort by vsOpponent at-bats when present, falling back to last20's
+        # at-bats so those rows don't all clump arbitrarily at the bottom.
+        def sort_key(r):
+            vs = r["stats"]["vsOpponent"]
+            if vs is not None:
+                return (1, vs["atBats"])
+            l20 = r["stats"]["last20"]
+            return (0, l20["atBats"] if l20 else 0)
+        rows.sort(key=sort_key, reverse=True)
+        return rows
+
+    return {
+        # Resolved full names (e.g. "Kia Tigers"), not whatever short code
+        # the odds feed happened to send (e.g. "TIG") -- the frontend uses
+        # these for display so a team-name abbreviation upstream doesn't
+        # leak into the UI even though _resolve_kbo_team already handled it
+        # internally for the actual data lookup.
+        "homeTeamName": home_team,
+        "awayTeamName": away_team,
+        "homeBattersVsAway": side_batters(home_team, away["oppCode"]),
+        "awayBattersVsHome": side_batters(away_team, home["oppCode"]),
+    }
+
+
+KST = datetime.timezone(datetime.timedelta(hours=9))
+# 11pm KST -- KBO games start 6-7pm KST and normally finish by 9:30-10:30pm;
+# this pads well past that for extra innings, doubleheaders, or a late
+# start, without waiting so long that "right after games finish" stops
+# being true. There's no live game-status check here (that would mean more
+# scraping just to time the scraping) -- this is a fixed clock time chosen
+# to reliably fall after the day's games, not a dynamic "are they done yet"
+# poll.
+KBO_PREWARM_HOUR_KST = 23
+KBO_PREWARM_TEAM_DELAY = 20  # seconds paused between teams
+KBO_PREWARM_PLAYER_DELAY = 1.0  # seconds paused between each player within a team
+
+
+def prewarm_kbo_cache():
+    """Refreshes every KBO team's roster + every player's game log, once a
+    day right after games finish (see refresh_kbo_prewarm_loop) -- so a
+    live KBO Matchups click almost always hits the already-warm cache
+    instead of triggering the real scrape on the spot. This is deliberately
+    slower and gentler than the on-demand path (a full 20s pause between
+    teams, a full 1s pause between players, vs. on-demand's 0.3s stagger
+    and 2-worker pool): nothing is waiting on a background job, so there's
+    no reason to rush it and risk tripping mykbostats' rate limit the way
+    rapid manual testing across several teams did earlier. Populates the
+    exact same cache entries get_kbo_roster/_get_kbo_player_games already
+    read from, so nothing else needs to change to benefit from this
+    running."""
+    for team_name in KBO_TEAM_ROSTER:
+        try:
+            roster = get_kbo_roster(team_name)
+            for p in roster:
+                try:
+                    _get_kbo_player_games(p["id"])
+                except UpstreamError as e:
+                    print(f"[vantage] KBO prewarm: {team_name} - {p.get('fullName')} failed: {e.message}")
+                time.sleep(KBO_PREWARM_PLAYER_DELAY)
+        except UpstreamError as e:
+            print(f"[vantage] KBO prewarm: {team_name} roster failed: {e.message}")
+        time.sleep(KBO_PREWARM_TEAM_DELAY)
+
+
+def _seconds_until_next_kbo_prewarm():
+    now = datetime.datetime.now(KST)
+    target = now.replace(hour=KBO_PREWARM_HOUR_KST, minute=0, second=0, microsecond=0)
+    if target <= now:
+        target += datetime.timedelta(days=1)
+    return (target - now).total_seconds()
+
+
+def refresh_kbo_prewarm_loop():
+    while True:
+        wait_s = _seconds_until_next_kbo_prewarm()
+        print(f"[vantage] KBO prewarm: next run in {wait_s / 3600:.1f}h (11pm KST, right after games finish)")
+        time.sleep(wait_s)
+        try:
+            prewarm_kbo_cache()
+            print("[vantage] KBO prewarm cycle complete")
+        except Exception as e:
+            print(f"[vantage] KBO prewarm cycle failed: {e}")
+        # Sleep past the target minute before recomputing, so a cycle that
+        # finishes in under 60s (e.g. everything already cached) can't loop
+        # back and immediately re-trigger for the same target time.
+        time.sleep(60)
+
+
 ESPN_GOLF_SCOREBOARD = "https://site.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard"
 ESPN_GOLF_LEADERBOARD = "https://site.api.espn.com/apis/site/v2/sports/golf/leaderboard"
 GOLF_LIVE_CACHE_TTL = 60
@@ -1004,6 +1393,8 @@ class Handler(BaseHTTPRequestHandler):
             self.handle_game_log(parsed)
         elif parsed.path == "/api/mlb-matchups":
             self.handle_mlb_matchups(parsed)
+        elif parsed.path == "/api/kbo-matchups":
+            self.handle_kbo_matchups(parsed)
         elif parsed.path == "/api/best-no-vig":
             self.handle_best_no_vig(parsed)
         elif parsed.path == "/api/golf":
@@ -1157,6 +1548,25 @@ class Handler(BaseHTTPRequestHandler):
         except UpstreamError as e:
             self.send_json(e.status if e.status < 600 else 502, {"success": False, "error": e.message})
 
+    def handle_kbo_matchups(self, parsed):
+        qs = urllib.parse.parse_qs(parsed.query)
+
+        def one(key, default=None):
+            return (qs.get(key) or [default])[0]
+
+        home_team = one("homeTeam")
+        away_team = one("awayTeam")
+
+        if not all([home_team, away_team]):
+            self.send_json(400, {"success": False, "error": "homeTeam and awayTeam are required (team display names, e.g. 'Kia Tigers')"})
+            return
+
+        try:
+            result = build_kbo_matchup(home_team, away_team)
+            self.send_json(200, {"success": True, **result})
+        except UpstreamError as e:
+            self.send_json(e.status if e.status < 600 else 502, {"success": False, "error": e.message})
+
     def handle_static(self, parsed):
         path = parsed.path
         if path == "/":
@@ -1192,6 +1602,16 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Access-Control-Allow-Origin", "*")
+        # Without this, browsers can silently cache a GET fetch() response
+        # even with no explicit caching headers present -- bit us during KBO
+        # testing, where a hard page-refresh reloaded index.html/app.js fresh
+        # but a JS-triggered fetch() to an already-seen API URL (same query
+        # string) still served a stale cached response instead of hitting
+        # this server again. All of this endpoint's actual caching already
+        # happens server-side (the _cache dict, with real per-endpoint TTLs)
+        # and is intentional; the browser doing its own opportunistic layer
+        # on top is not.
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
 
@@ -1202,6 +1622,7 @@ if __name__ == "__main__":
     else:
         threading.Thread(target=refresh_best_no_vig_loop, daemon=True).start()
     threading.Thread(target=refresh_golf_loop, daemon=True).start()
+    threading.Thread(target=refresh_kbo_prewarm_loop, daemon=True).start()
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print(f"[vantage] Serving on http://localhost:{PORT}")
     server.serve_forever()

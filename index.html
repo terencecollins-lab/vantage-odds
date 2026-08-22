@@ -37,6 +37,7 @@
       <button class="view-tab active" id="view-tab-markets" data-view="markets">Markets</button>
       <button class="view-tab" id="view-tab-novig" data-view="novig">Best No-Vig</button>
       <button class="view-tab" id="view-tab-mlb" data-view="mlb">MLB Matchups</button>
+      <button class="view-tab" id="view-tab-kbo" data-view="kbo">KBO Matchups</button>
       <button class="view-tab" id="view-tab-golf" data-view="golf">Golf</button>
     </nav>
 
@@ -98,6 +99,26 @@
       <div id="mlb-matchup-content"></div>
     </div>
 
+    <div id="kbo-matchups-view" hidden>
+      <section class="controls-row">
+        <div class="sort-wrap">
+          <label for="kbo-game-select">Game</label>
+          <select id="kbo-game-select"></select>
+        </div>
+        <div class="sort-wrap">
+          <label for="kbo-view-select">Show</label>
+          <select id="kbo-view-select">
+            <option value="vsOpponent">Vs. opponent (career)</option>
+            <option value="last5">Last 5 games</option>
+            <option value="last10">Last 10 games</option>
+            <option value="last20">Last 20 games</option>
+          </select>
+        </div>
+      </section>
+      <p class="mlb-subtitle" style="margin:0 0 12px;">KBO has no batter-vs-specific-pitcher data available anywhere (checked by hand) — "Vs. opponent" is each batter's career at-bats against the opponent TEAM as a whole, not today's specific starter. "Last N games" is recent form regardless of opponent.</p>
+      <div id="kbo-matchup-content"></div>
+    </div>
+
     <div id="golf-view" hidden>
       <section class="controls-row">
         <p class="mlb-subtitle" id="golf-tournament-label" style="margin:0;">Loading current PGA Tour event…</p>
@@ -107,7 +128,7 @@
     </div>
 
     <footer class="app-footer">
-      Vantage displays real odds data licensed from <a href="https://sportsgameodds.com" target="_blank" rel="noopener">SportsGameOdds</a>, and batter/pitcher matchup history from MLB's public Stats API. It does not accept wagers or process payments — it only compares publicly posted sportsbook lines. "Best" and "fair" odds are informational estimates, not guarantees. 18+ only where applicable; check local regulations before wagering with any linked sportsbook.
+      Vantage displays real odds data licensed from <a href="https://sportsgameodds.com" target="_blank" rel="noopener">SportsGameOdds</a>, batter/pitcher matchup history from MLB's public Stats API, and KBO batter-vs-team history scraped from mykbostats.com (an unofficial fan-run source). It does not accept wagers or process payments — it only compares publicly posted sportsbook lines. "Best" and "fair" odds are informational estimates, not guarantees. 18+ only where applicable; check local regulations before wagering with any linked sportsbook.
     </footer>
   </div>
 

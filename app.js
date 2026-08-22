@@ -1,6 +1,7 @@
 import { LEAGUES, LEAGUE_GROUPS, MARKET_TYPES, fetchLiveItems, fetchMarketsRaw, fetchBestNoVig, fetchGolf, fetchGameLog, formatAmerican } from './odds.js';
 import { SAMPLE_ITEMS } from './sample-odds.js';
 import { fetchMlbGames, fetchMlbMatchup } from './mlb.js';
+import { fetchKboGames, fetchKboMatchup } from './kbo.js';
 
 const WATCHLIST_KEY = 'vantage.watchlist';
 const THEME_KEY = 'vantage.theme';
@@ -24,6 +25,12 @@ const state = {
   mlbLoading: false,
   mlbError: null,
   mlbData: null,
+  kboGames: [],
+  kboSelectedGameKey: null,
+  kboView: 'vsOpponent',
+  kboLoading: false,
+  kboError: null,
+  kboData: null,
   noVigItems: [],
   noVigLoading: false,
   noVigError: null,
@@ -62,6 +69,11 @@ const el = {
   golfView: document.getElementById('golf-view'),
   mlbGameSelect: document.getElementById('mlb-game-select'),
   mlbMatchupContent: document.getElementById('mlb-matchup-content'),
+  viewTabKbo: document.getElementById('view-tab-kbo'),
+  kboView: document.getElementById('kbo-matchups-view'),
+  kboGameSelect: document.getElementById('kbo-game-select'),
+  kboViewSelect: document.getElementById('kbo-view-select'),
+  kboMatchupContent: document.getElementById('kbo-matchup-content'),
   noVigGrid: document.getElementById('novig-grid'),
   noVigEmpty: document.getElementById('novig-empty'),
   noVigRefresh: document.getElementById('novig-refresh'),
@@ -554,6 +566,84 @@ async function loadMlbMatchup() {
   }
 }
 
+async function loadKboGames() {
+  el.kboGameSelect.innerHTML = '<option>Loading games…</option>';
+  try {
+    state.kboGames = await fetchKboGames();
+    if (state.kboGames.length === 0) {
+      el.kboGameSelect.innerHTML = '<option>No upcoming KBO games found</option>';
+      el.kboMatchupContent.innerHTML = '';
+      return;
+    }
+    el.kboGameSelect.innerHTML = state.kboGames.map((g) => `<option value="${gameKey(g)}">${formatGameLabel(g)}</option>`).join('');
+    state.kboSelectedGameKey = gameKey(state.kboGames[0]);
+    el.kboGameSelect.value = state.kboSelectedGameKey;
+    await loadKboMatchup();
+  } catch (err) {
+    el.kboGameSelect.innerHTML = '<option>Error loading games</option>';
+    el.kboMatchupContent.innerHTML = `<p class="form-note">Could not load KBO games (${err.message}).</p>`;
+  }
+}
+
+function kboBatterRow(b) {
+  const s = b.stats[state.kboView];
+  const fmt = (v) => (v != null ? v.toFixed(3).replace(/^0/, '') : '—');
+  if (!s) {
+    return `<tr class="kbo-row-empty"><td>${b.fullName}</td><td colspan="7">No games in this window</td></tr>`;
+  }
+  return `<tr>
+    <td>${b.fullName}</td>
+    <td>${s.gamesFound}</td>
+    <td>${s.atBats}</td>
+    <td>${s.hits}</td>
+    <td>${s.runs}</td>
+    <td>${s.rbi}</td>
+    <td>${s.homeRuns}</td>
+    <td>${fmt(s.avg)}</td>
+  </tr>`;
+}
+
+function kboTeamCard(title, batters) {
+  if (!batters || batters.length === 0) {
+    return `<div class="mlb-pitcher-card"><h3>${title}</h3><p class="mlb-subtitle">No data found for this view.</p></div>`;
+  }
+  return `<div class="mlb-pitcher-card">
+    <h3>${title}</h3>
+    <div class="mlb-table-wrap">
+      <table class="mlb-table">
+        <thead><tr><th>Batter</th><th>GP</th><th>AB</th><th>H</th><th>R</th><th>RBI</th><th>HR</th><th>AVG</th></tr></thead>
+        <tbody>${batters.map(kboBatterRow).join('')}</tbody>
+      </table>
+    </div>
+  </div>`;
+}
+
+function renderKboMatchup() {
+  const data = state.kboData;
+  const game = state.kboGames.find((g) => gameKey(g) === state.kboSelectedGameKey);
+  if (!data || !game) return;
+  // Prefer the backend's resolved full team names (e.g. "Kia Tigers") over
+  // game.awayName/homeName, which come straight from the odds feed and can
+  // be an abbreviation (e.g. "TIG") -- see _resolve_kbo_team in server.py.
+  const awayLabel = data.awayTeamName || game.awayName;
+  const homeLabel = data.homeTeamName || game.homeName;
+  el.kboMatchupContent.innerHTML =
+    kboTeamCard(`${awayLabel} batters vs. ${homeLabel}`, data.awayBattersVsHome) +
+    kboTeamCard(`${homeLabel} batters vs. ${awayLabel}`, data.homeBattersVsAway);
+}
+
+async function loadKboMatchup() {
+  const game = state.kboGames.find((g) => gameKey(g) === state.kboSelectedGameKey);
+  if (!game) return;
+  el.kboMatchupContent.innerHTML = '<p class="form-note">Loading matchup data… (mykbostats.com is slower than MLB\'s API, this can take a few seconds)</p>';
+  try {
+    state.kboData = await fetchKboMatchup(game);
+    renderKboMatchup();
+  } catch (err) {
+    el.kboMatchupContent.innerHTML = `<p class="form-note">Could not load matchup data (${err.message}).</p>`;
+  }
+}
+
 const NOVIG_REFRESH_INTERVAL_MS = 30000;
 
 async function loadBestNoVig() {
@@ -683,14 +773,19 @@ function setView(view) {
   state.view = view;
   el.viewTabMarkets.classList.toggle('active', view === 'markets');
   el.viewTabMlb.classList.toggle('active', view === 'mlb');
+  el.viewTabKbo.classList.toggle('active', view === 'kbo');
   el.viewTabNoVig.classList.toggle('active', view === 'novig');
   el.viewTabGolf.classList.toggle('active', view === 'golf');
   el.marketsView.hidden = view !== 'markets';
   el.mlbView.hidden = view !== 'mlb';
+  el.kboView.hidden = view !== 'kbo';
   el.noVigView.hidden = view !== 'novig';
   el.golfView.hidden = view !== 'golf';
   if (view === 'mlb' && state.mlbGames.length === 0) {
     loadMlbGames();
+  }
+  if (view === 'kbo' && state.kboGames.length === 0) {
+    loadKboGames();
   }
   if (view === 'novig') {
     if (state.noVigItems.length === 0) loadBestNoVig();
@@ -714,6 +809,15 @@ el.noVigRefresh.addEventListener('click', () => loadBestNoVig());
 el.mlbGameSelect.addEventListener('change', () => {
   state.mlbSelectedGameKey = el.mlbGameSelect.value;
   loadMlbMatchup();
+});
+el.viewTabKbo.addEventListener('click', () => setView('kbo'));
+el.kboGameSelect.addEventListener('change', () => {
+  state.kboSelectedGameKey = el.kboGameSelect.value;
+  loadKboMatchup();
+});
+el.kboViewSelect.addEventListener('change', () => {
+  state.kboView = el.kboViewSelect.value;
+  renderKboMatchup();
 });
 
 render();
