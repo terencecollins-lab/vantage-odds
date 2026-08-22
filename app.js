@@ -272,6 +272,7 @@ function renderCard(item) {
     <div class="item-name">${item.name}</div>
     <div class="rating-row">${formatKickoff(item.startsAt)} ${coverageLabel ? `<span class="coverage-badge" title="Earliest finalized-game history SportsGameOdds has for ${item.league} — used for the recent-form stats below">History since ${coverageLabel}</span>` : ''}</div>
     <div class="movement-row">${item.openBookOdds ? `Opened ${formatAmerican(item.openBookOdds)} → Now ${formatAmerican(item.bestPrice)} ${arrow}` : ''}</div>
+    ${item.statID ? `<div class="mini-form-slot mini-form-loading" data-mini="${item.id}">Loading recent form…</div>` : ''}
     <div class="price-row">
       <span class="best-price">${formatAmerican(item.bestPrice)}</span>
       ${item.fairOdds ? `<span class="market-price">${formatAmerican(item.fairOdds)}</span>` : ''}
@@ -294,11 +295,86 @@ function bindCardEvents(container) {
   });
 }
 
+// Mini recent-form strip on each card: last 5 games + last 5 H2H, using the
+// exact same hit/miss dot language as the modal's full Recent Form section
+// (see isHit), just smaller. Fetched per-card rather than baked into
+// /api/markets, since the underlying /api/game-log call is keyed by
+// player+stat+opponent and reused as-is from the modal's own fetch path --
+// no new backend endpoint needed. This does mean a full grid of props (up
+// to a few dozen with statID set) triggers that many game-log fetches up
+// front instead of one on demand; kept to MINI_FORM_CONCURRENCY concurrent
+// requests at a time (not all at once) to avoid hammering the server, and
+// cached client-side by item.id so switching filters/sort (which
+// re-renders the same cards) doesn't refetch already-loaded ones.
+const MINI_FORM_CONCURRENCY = 4;
+const miniFormCache = new Map(); // item.id -> { games, h2h } | 'error'
+
+function miniFormRow(label, games, item, cap = 5) {
+  const slice = games.slice(0, cap);
+  if (!slice.length) {
+    return `<div class="mini-form-row"><span class="mini-form-label">${label}</span><span class="mini-form-empty">No data</span></div>`;
+  }
+  const dots = slice
+    .map((g) => {
+      const hit = isHit(item, g.statValue);
+      const cls = hit == null ? '' : hit ? 'hit' : 'miss';
+      return `<span class="mini-dot ${cls}"></span>`;
+    })
+    .join('');
+  const hits = slice.filter((g) => isHit(item, g.statValue)).length;
+  const pct = Math.round((hits / slice.length) * 100);
+  return `<div class="mini-form-row"><span class="mini-form-label">${label}</span>${dots}<span class="mini-form-rate">${hits}/${slice.length} (${pct}%)</span></div>`;
+}
+
+function paintMiniForm(itemId, container) {
+  const slot = container.querySelector(`[data-mini="${itemId}"]`);
+  if (!slot) return; // card isn't in this container (different tab/grid) or got filtered out since
+  const cached = miniFormCache.get(itemId);
+  slot.classList.remove('mini-form-loading');
+  if (cached === 'error' || !cached) {
+    slot.innerHTML = '<div class="mini-form-row mini-form-empty">Form unavailable</div>';
+    return;
+  }
+  const item = state.items.find((i) => i.id === itemId) || state.noVigItems.find((i) => i.id === itemId);
+  if (!item) return;
+  slot.innerHTML = miniFormRow('L5', cached.games, item) + miniFormRow('H2H', cached.h2h, item);
+}
+
+async function loadMiniForms(items, container) {
+  const pending = items.filter((i) => i.statID && !miniFormCache.has(i.id));
+  // Anything already cached (from a previous render of the same item) can
+  // paint immediately without waiting on the network at all.
+  items.filter((i) => i.statID && miniFormCache.has(i.id)).forEach((i) => paintMiniForm(i.id, container));
+
+  let idx = 0;
+  async function worker() {
+    while (idx < pending.length) {
+      const item = pending[idx++];
+      try {
+        const { games, h2h } = await fetchGameLog({
+          league: item.league,
+          teamID: item.playerTeamID,
+          playerID: item.playerID,
+          statID: item.statID,
+          opponentTeamID: item.opponentTeamID,
+        });
+        miniFormCache.set(item.id, { games, h2h });
+      } catch (err) {
+        miniFormCache.set(item.id, 'error');
+      }
+      paintMiniForm(item.id, container);
+    }
+  }
+  const workers = Array.from({ length: Math.min(MINI_FORM_CONCURRENCY, pending.length) }, worker);
+  await Promise.all(workers);
+}
+
 function renderGrid() {
   const items = getFilteredItems();
   el.empty.hidden = items.length !== 0 || state.loading;
   el.grid.innerHTML = state.loading ? '<p class="empty-state">Loading live odds…</p>' : items.map(renderCard).join('');
   bindCardEvents(el.grid);
+  if (!state.loading) loadMiniForms(items, el.grid);
 }
 
 function openModal(id) {
@@ -676,6 +752,7 @@ function renderNoVig() {
   el.noVigEmpty.hidden = state.noVigItems.length !== 0;
   el.noVigGrid.innerHTML = state.noVigItems.map(renderCard).join('');
   bindCardEvents(el.noVigGrid);
+  loadMiniForms(state.noVigItems, el.noVigGrid);
 }
 
 function startNoVigAutoRefresh() {
