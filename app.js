@@ -666,7 +666,7 @@ function kboBatterRow(b) {
   const s = b.stats[state.kboView];
   const fmt = (v) => (v != null ? v.toFixed(3).replace(/^0/, '') : '—');
   if (!s) {
-    return `<tr class="kbo-row-empty"><td>${b.fullName}</td><td colspan="7">No games in this window</td></tr>`;
+    return `<tr class="kbo-row-empty"><td>${b.fullName}</td><td colspan="11">No games in this window</td></tr>`;
   }
   return `<tr>
     <td>${b.fullName}</td>
@@ -676,7 +676,11 @@ function kboBatterRow(b) {
     <td>${s.runs}</td>
     <td>${s.rbi}</td>
     <td>${s.homeRuns}</td>
+    <td>${s.walks}</td>
     <td>${fmt(s.avg)}</td>
+    <td>${fmt(s.obp)}</td>
+    <td>${fmt(s.slg)}</td>
+    <td>${fmt(s.ops)}</td>
   </tr>`;
 }
 
@@ -688,7 +692,7 @@ function kboTeamCard(title, batters) {
     <h3>${title}</h3>
     <div class="mlb-table-wrap">
       <table class="mlb-table">
-        <thead><tr><th>Batter</th><th>GP</th><th>AB</th><th>H</th><th>R</th><th>RBI</th><th>HR</th><th>AVG</th></tr></thead>
+        <thead><tr><th>Batter</th><th>GP</th><th>AB</th><th>H</th><th>R</th><th>RBI</th><th>HR</th><th>BB</th><th>AVG</th><th>OBP</th><th>SLG</th><th>OPS</th></tr></thead>
         <tbody>${batters.map(kboBatterRow).join('')}</tbody>
       </table>
     </div>

@@ -3,7 +3,11 @@
 // endpoint needed), then /api/mlb-matchups for the actual matchup history.
 
 export async function fetchMlbGames() {
-  const res = await fetch('/api/markets?league=MLB');
+  // excludeStarted=false: for now, MLB Matchups' own game picker should
+  // still offer an already-started game (e.g. to check history mid-game),
+  // even though the main Markets grid filters those out -- see
+  // build_markets/handle_markets in server.py.
+  const res = await fetch('/api/markets?league=MLB&excludeStarted=false');
   const json = await res.json();
   if (!res.ok || json.success === false) {
     throw new Error(json.error || `Request failed (${res.status})`);

@@ -382,7 +382,39 @@ def team_short_name(team_obj):
     return names.get("medium") or names.get("short") or names.get("long") or "Unknown"
 
 
-def build_markets(events):
+GAME_STARTED_CUTOFF_MINUTES = 60
+
+
+def _game_started_too_long_ago(starts_at_iso):
+    """True once a game's own start time is more than
+    GAME_STARTED_CUTOFF_MINUTES in the past. Used to drop already-underway
+    games from /api/markets (and therefore from Best No-Vig, and from the
+    MLB/KBO Matchups game pickers, both of which build their game lists
+    from this same endpoint's Moneyline items) -- once a game's well past
+    its start, its pre-game odds/props are stale and not worth continuing
+    to serve, and for MLB/KBO Matchups specifically, no longer offering it
+    as a pickable game means no one can trigger a fresh full-roster scrape
+    against it either.
+    """
+    if not starts_at_iso:
+        return False
+    try:
+        starts_at = datetime.datetime.fromisoformat(starts_at_iso.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return False
+    return (datetime.datetime.now(datetime.timezone.utc) - starts_at) > datetime.timedelta(minutes=GAME_STARTED_CUTOFF_MINUTES)
+
+
+def build_markets(events, exclude_started=True):
+    """exclude_started controls whether _game_started_too_long_ago filters
+    out already-underway games. Left True by default for the main Markets
+    grid and Best No-Vig (where a stale in-progress game's props aren't
+    worth showing or fetching mini-form data for), but MLB/KBO Matchups'
+    own game pickers pass exclude_started=False for now -- those tabs still
+    want to offer an already-started game as a pickable matchup, e.g. to
+    check history mid-game, so this filter shouldn't remove it from their
+    dropdowns even though it removes it from the main grid.
+    """
     items = []
     for event in events:
         teams = event.get("teams") or {}
@@ -390,6 +422,8 @@ def build_markets(events):
         away = team_short_name(teams.get("away"))
         matchup = f"{away} @ {home}"
         starts_at = (event.get("status") or {}).get("startsAt")
+        if exclude_started and _game_started_too_long_ago(starts_at):
+            continue
         players = event.get("players") or {}
         home_team_id = (teams.get("home") or {}).get("teamID")
         away_team_id = (teams.get("away") or {}).get("teamID")
@@ -873,20 +907,33 @@ def get_kbo_roster(team_name):
 
 
 def _aggregate_games(games):
-    """list of game dicts -> counting-stat totals, or None if the list is
-    empty (no at-bats in this window -- covers both a batter genuinely
-    having fewer than N games played and pitcher ids that never bat)."""
+    """list of game dicts -> counting-stat totals plus rate stats, or None
+    if the list is empty (no at-bats in this window -- covers both a batter
+    genuinely having fewer than N games played and pitcher ids that never
+    bat). OBP here omits sacrifice flies from the denominator -- mykbostats'
+    game log table doesn't carry a SF column -- so it's a close approximation
+    of the real stat, not an exact match to official KBO OBP."""
     if not games:
         return None
-    totals = {"atBats": 0, "hits": 0, "runs": 0, "rbi": 0, "homeRuns": 0}
+    totals = {"atBats": 0, "hits": 0, "runs": 0, "rbi": 0, "homeRuns": 0, "doubles": 0, "triples": 0, "walks": 0, "hitByPitch": 0}
     for g in games:
         totals["atBats"] += g["ab"]
         totals["hits"] += g["h"]
         totals["runs"] += g["r"]
         totals["rbi"] += g["rbi"]
         totals["homeRuns"] += g["hr"]
+        totals["doubles"] += g["doubles"]
+        totals["triples"] += g["triples"]
+        totals["walks"] += g["bb"]
+        totals["hitByPitch"] += g["hbp"]
     totals["gamesFound"] = len(games)
-    totals["avg"] = round(totals["hits"] / totals["atBats"], 3) if totals["atBats"] else None
+    ab, h, bb, hbp = totals["atBats"], totals["hits"], totals["walks"], totals["hitByPitch"]
+    total_bases = h + totals["doubles"] + 2 * totals["triples"] + 3 * totals["homeRuns"]
+    obp_denom = ab + bb + hbp
+    totals["avg"] = round(h / ab, 3) if ab else None
+    totals["obp"] = round((h + bb + hbp) / obp_denom, 3) if obp_denom else None
+    totals["slg"] = round(total_bases / ab, 3) if ab else None
+    totals["ops"] = round(totals["obp"] + totals["slg"], 3) if (totals["obp"] is not None and totals["slg"] is not None) else None
     return totals
 
 
@@ -915,14 +962,19 @@ def _get_kbo_player_games(player_id):
         # this needs updating to match (see kbo_scraper.py's equivalent
         # note).
         for row in rows[1:]:  # skip header row
-            if len(row) < 9:
+            if len(row) < 11:
                 continue
             date_str, opp = row[0], row[1]
             try:
-                ab, r, h, hr, rbi = int(row[2]), int(row[3]), int(row[4]), int(row[7]), int(row[8])
+                ab, r, h = int(row[2]), int(row[3]), int(row[4])
+                doubles, triples, hr, rbi = int(row[5]), int(row[6]), int(row[7]), int(row[8])
+                bb, hbp = int(row[9]), int(row[10])
             except ValueError:
                 continue  # a totals/subtotal row, or a blank cell -- skip
-            games.append({"opp": opp, "ab": ab, "r": r, "h": h, "hr": hr, "rbi": rbi})
+            games.append({
+                "opp": opp, "ab": ab, "r": r, "h": h, "hr": hr, "rbi": rbi,
+                "doubles": doubles, "triples": triples, "bb": bb, "hbp": hbp,
+            })
     _cache_set(cache_key, KBO_GAMELOG_CACHE_TTL, games)
     return games
 
@@ -1421,13 +1473,18 @@ class Handler(BaseHTTPRequestHandler):
             return
         qs = urllib.parse.parse_qs(parsed.query)
         league_id = (qs.get("league") or ["NFL"])[0]
+        # Defaults to True (excludes already-started games) for the main
+        # Markets grid and Best No-Vig. MLB/KBO Matchups' game pickers pass
+        # excludeStarted=false explicitly since those tabs still want
+        # already-started games pickable for now -- see build_markets.
+        exclude_started = (qs.get("excludeStarted") or ["true"])[0].lower() != "false"
         try:
             data = fetch_events(
                 {"leagueID": league_id, "oddsAvailable": "true", "limit": "12"},
                 cache_ns="markets",
                 ttl=MARKETS_CACHE_TTL,
             )
-            items = build_markets(data.get("data") or [])
+            items = build_markets(data.get("data") or [], exclude_started=exclude_started)
             coverage_since = get_league_coverage_since(league_id)
             self.send_json(200, {"success": True, "items": items, "coverageSince": coverage_since})
         except UpstreamError as e:

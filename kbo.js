@@ -11,7 +11,11 @@
 // one-line alias in server.py's KBO_TEAM_ROSTER, not a change here.
 
 export async function fetchKboGames() {
-  const res = await fetch('/api/markets?league=KBO');
+  // excludeStarted=false: for now, KBO Matchups' own game picker should
+  // still offer an already-started game (e.g. to check history mid-game),
+  // even though the main Markets grid filters those out -- see
+  // build_markets/handle_markets in server.py.
+  const res = await fetch('/api/markets?league=KBO&excludeStarted=false');
   const json = await res.json();
   if (!res.ok || json.success === false) {
     throw new Error(json.error || `Request failed (${res.status})`);
