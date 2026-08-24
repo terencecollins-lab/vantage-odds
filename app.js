@@ -300,14 +300,69 @@ function bindCardEvents(container) {
 // (see isHit), just smaller. Fetched per-card rather than baked into
 // /api/markets, since the underlying /api/game-log call is keyed by
 // player+stat+opponent and reused as-is from the modal's own fetch path --
-// no new backend endpoint needed. This does mean a full grid of props (up
-// to a few dozen with statID set) triggers that many game-log fetches up
-// front instead of one on demand; kept to MINI_FORM_CONCURRENCY concurrent
-// requests at a time (not all at once) to avoid hammering the server, and
-// cached client-side by item.id so switching filters/sort (which
-// re-renders the same cards) doesn't refetch already-loaded ones.
+// no new backend endpoint needed.
+//
+// Lazy by viewport, not by grid: a full render (especially Best No-Vig,
+// which combines cards from all 41 leagues in one grid) can be a few dozen
+// statID cards at once, and fetching every one of them immediately used to
+// fire that many game-log requests up front regardless of how many were
+// actually visible. An IntersectionObserver instead only enqueues a card's
+// fetch once it's scrolled near the viewport (rootMargin gives it a head
+// start so the dots are usually ready by the time you actually see the
+// card), and MINI_FORM_CONCURRENCY still caps how many of those run at
+// once, in case a fast scroll or resize reveals many cards in one frame.
+// Cached client-side by item.id so switching filters/sort/tabs (which
+// re-renders the same cards) never refetches an already-loaded one, even
+// if it's re-observed.
 const MINI_FORM_CONCURRENCY = 4;
 const miniFormCache = new Map(); // item.id -> { games, h2h } | 'error'
+const miniFormQueue = []; // { item, container }
+let miniFormActiveWorkers = 0;
+
+function pumpMiniFormQueue() {
+  while (miniFormActiveWorkers < MINI_FORM_CONCURRENCY && miniFormQueue.length) {
+    const { item, container } = miniFormQueue.shift();
+    if (miniFormCache.has(item.id)) {
+      paintMiniForm(item.id, container);
+      continue;
+    }
+    miniFormActiveWorkers++;
+    fetchGameLog({
+      league: item.league,
+      teamID: item.playerTeamID,
+      playerID: item.playerID,
+      statID: item.statID,
+      opponentTeamID: item.opponentTeamID,
+    })
+      .then(({ games, h2h }) => miniFormCache.set(item.id, { games, h2h }))
+      .catch(() => miniFormCache.set(item.id, 'error'))
+      .then(() => {
+        paintMiniForm(item.id, container);
+        miniFormActiveWorkers--;
+        pumpMiniFormQueue();
+      });
+  }
+}
+
+const miniFormObserver = new IntersectionObserver(
+  (entries) => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      miniFormObserver.unobserve(entry.target);
+      const itemId = entry.target.dataset.mini;
+      const container = entry.target.closest('.card-grid');
+      const item = state.items.find((i) => i.id === itemId) || state.noVigItems.find((i) => i.id === itemId);
+      if (!item || !container) continue;
+      if (miniFormCache.has(itemId)) {
+        paintMiniForm(itemId, container);
+      } else {
+        miniFormQueue.push({ item, container });
+        pumpMiniFormQueue();
+      }
+    }
+  },
+  { rootMargin: '400px 0px' } // start loading a bit before it's actually on-screen
+);
 
 function miniFormRow(label, games, item, cap = 5) {
   const slice = games.slice(0, cap);
@@ -340,33 +395,21 @@ function paintMiniForm(itemId, container) {
   slot.innerHTML = miniFormRow('L5', cached.games, item) + miniFormRow('H2H', cached.h2h, item);
 }
 
-async function loadMiniForms(items, container) {
-  const pending = items.filter((i) => i.statID && !miniFormCache.has(i.id));
+function loadMiniForms(items, container) {
   // Anything already cached (from a previous render of the same item) can
-  // paint immediately without waiting on the network at all.
-  items.filter((i) => i.statID && miniFormCache.has(i.id)).forEach((i) => paintMiniForm(i.id, container));
-
-  let idx = 0;
-  async function worker() {
-    while (idx < pending.length) {
-      const item = pending[idx++];
-      try {
-        const { games, h2h } = await fetchGameLog({
-          league: item.league,
-          teamID: item.playerTeamID,
-          playerID: item.playerID,
-          statID: item.statID,
-          opponentTeamID: item.opponentTeamID,
-        });
-        miniFormCache.set(item.id, { games, h2h });
-      } catch (err) {
-        miniFormCache.set(item.id, 'error');
-      }
+  // paint immediately without waiting on the network -- or on scrolling
+  // into view -- at all. Everything else is handed to miniFormObserver,
+  // which enqueues the actual fetch only once its card is near the
+  // viewport (see the observer's definition above for why).
+  for (const item of items) {
+    if (!item.statID) continue;
+    if (miniFormCache.has(item.id)) {
       paintMiniForm(item.id, container);
+      continue;
     }
+    const slot = container.querySelector(`[data-mini="${item.id}"]`);
+    if (slot) miniFormObserver.observe(slot);
   }
-  const workers = Array.from({ length: Math.min(MINI_FORM_CONCURRENCY, pending.length) }, worker);
-  await Promise.all(workers);
 }
 
 function renderGrid() {
