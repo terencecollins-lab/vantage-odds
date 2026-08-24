@@ -48,9 +48,9 @@ Then open http://localhost:5173
 This is what lets the [VantageIOS](../VantageIOS) app work on a real device, since a physical phone can't reach your Mac's `localhost`. This app previously ran on Render's free tier, but that tier's 512MB RAM was getting OOM-killed once the league count grew to 41 (each restart shows as an instant 502) — moved to a self-managed VM instead, which has far more headroom and doesn't spin down when idle.
 
 1. Provision a VM (an Oracle Cloud "Always Free" Ampere instance works well — 4 OCPUs / 24GB RAM available on the free tier, though this app only needs a small fraction of that). Ubuntu is assumed below.
-2. **Open port 80 in *two* places** — this is the most common gotcha:
-   - The cloud provider's network-level firewall (on OCI: the instance's subnet → Security List → Add Ingress Rule, source `0.0.0.0/0`, TCP, port 80).
-   - The instance's own OS-level firewall. Oracle's stock Ubuntu image ships `iptables` rules that allow only SSH by default and reject everything else — you need an explicit `ACCEPT` rule for port 80 too, added *before* the existing `REJECT` rule, then persisted (`sudo netfilter-persistent save`) so it survives reboots.
+2. **Open ports 80 and 443 in *two* places each** — this is the most common gotcha:
+   - The cloud provider's network-level firewall (on OCI: the instance's subnet → Security List → Add Ingress Rule, source `0.0.0.0/0`, TCP, for each port).
+   - The instance's own OS-level firewall. Oracle's stock Ubuntu image ships `iptables` rules that allow only SSH by default and reject everything else — you need an explicit `ACCEPT` rule for each port too, added *before* the existing `REJECT` rule, then persisted (`sudo netfilter-persistent save`) so it survives reboots.
 3. Install `git`, clone this repo, add `.env` with your `SPORTSGAMEODDS_API_KEY` (see Setup above) plus a `DEPLOY_WEBHOOK_SECRET` (any long random string) if you want auto-deploy — see below, and run `pip3 install -r requirements.txt` (needed for the KBO Matchups tab).
 4. Run it as a systemd service so it survives reboots and restarts on crash:
    ```
@@ -62,17 +62,27 @@ This is what lets the [VantageIOS](../VantageIOS) app work on a real device, sin
    Type=simple
    User=ubuntu
    WorkingDirectory=/home/ubuntu/vantage-odds
-   Environment=PORT=80
+   Environment=PORT=5173
    ExecStart=/usr/bin/python3 /home/ubuntu/vantage-odds/server.py
    Restart=always
    RestartSec=3
-   AmbientCapabilities=CAP_NET_BIND_SERVICE
 
    [Install]
    WantedBy=multi-user.target
    ```
-   `AmbientCapabilities=CAP_NET_BIND_SERVICE` lets the process bind port 80 without running as root. Then `sudo systemctl daemon-reload && sudo systemctl enable --now vantage`.
-5. **Auto-deploy on push** (mirrors what Render's GitHub integration did): add a GitHub webhook (repo → Settings → Webhooks → Add webhook) pointing at `http://<your-ip>/deploy`, content type `application/json`, secret = your `DEPLOY_WEBHOOK_SECRET`, event = "Just the push event". The `/deploy` endpoint verifies GitHub's HMAC signature before doing anything, then runs `git pull && systemctl restart vantage` — which needs a narrow passwordless-sudo grant:
+   Then `sudo systemctl daemon-reload && sudo systemctl enable --now vantage`. The app listens on plain HTTP on an unprivileged port — a reverse proxy in front of it (next step) is what actually faces the internet and handles TLS, so this doesn't need root or any special capability.
+5. **HTTPS via Caddy** — Let's Encrypt won't issue a certificate for a bare IP address, only a real hostname. If you don't have a domain, [sslip.io](https://sslip.io) gives you one for free with zero signup: `<your-ip-with-dashes>.sslip.io` (e.g. `129-146-200-237.sslip.io`) resolves automatically to that IP. Install Caddy (`caddyserver.com` has an apt repo for Debian/Ubuntu) and point it at the app:
+   ```
+   <your-hostname>.sslip.io {
+       reverse_proxy localhost:5173
+   }
+
+   http://<your-bare-ip> {
+       redir https://<your-hostname>.sslip.io{uri} permanent
+   }
+   ```
+   The second block matters: without it, a bare-IP request gets Caddy's default behavior of redirecting to `https://` *on that same bare IP*, which has no certificate and just fails. Explicitly redirecting the bare IP to the real hostname instead keeps old bookmarks/links working. `sudo systemctl reload caddy` picks up changes to `/etc/caddy/Caddyfile`; Caddy handles certificate issuance and renewal automatically from there.
+6. **Auto-deploy on push** (mirrors what Render's GitHub integration did): add a GitHub webhook (repo → Settings → Webhooks → Add webhook) pointing at `https://<your-hostname>.sslip.io/deploy`, content type `application/json`, secret = your `DEPLOY_WEBHOOK_SECRET`, event = "Just the push event". The `/deploy` endpoint verifies GitHub's HMAC signature before doing anything, then runs `git pull && systemctl restart vantage` — which needs a narrow passwordless-sudo grant:
    ```
    echo 'ubuntu ALL=(ALL) NOPASSWD: /bin/systemctl restart vantage' | sudo tee /etc/sudoers.d/vantage-deploy
    sudo chmod 440 /etc/sudoers.d/vantage-deploy
