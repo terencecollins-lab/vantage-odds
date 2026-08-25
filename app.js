@@ -92,52 +92,41 @@ function starIcon(active) {
   </svg>`;
 }
 
-// A hand making a clear peace/V sign, styled as an original mechanical/
-// robotic design (segmented finger joints, plated fist, banded wrist) --
-// not a copy of any stock photo, built from scratch with basic shapes.
-// Joint rings and knuckle bumps use currentColor at reduced opacity rather
-// than a second hardcoded color, so the whole icon still adapts
-// automatically between light/dark theme like every other icon in the app.
-function loadingHandSvg() {
-  return `<svg class="loading-hand" viewBox="0 0 120 140" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">
-    <rect x="38" y="108" width="44" height="28" rx="8" fill="currentColor"/>
-    <rect x="38" y="116" width="44" height="3.5" fill="currentColor" opacity="0.3"/>
-    <rect x="38" y="126" width="44" height="3.5" fill="currentColor" opacity="0.3"/>
-    <rect x="28" y="64" width="64" height="48" rx="20" fill="currentColor"/>
-    <circle cx="60" cy="88" r="9" fill="currentColor" opacity="0.3"/>
-    <circle cx="83" cy="70" r="10" fill="currentColor" opacity="0.55"/>
-    <circle cx="95" cy="79" r="8" fill="currentColor" opacity="0.4"/>
-    <g transform="rotate(-32 20 100)">
-      <rect x="12" y="86" width="15" height="20" rx="6.5" fill="currentColor"/>
-      <ellipse cx="19.5" cy="86" rx="8" ry="3" fill="currentColor" opacity="0.3"/>
-      <circle cx="19.5" cy="83" r="7.5" fill="currentColor"/>
-    </g>
-    <g transform="rotate(-14 49 64)">
-      <rect x="41" y="40" width="16" height="26" rx="7" fill="currentColor"/>
-      <ellipse cx="49" cy="40" rx="9" ry="3.5" fill="currentColor" opacity="0.3"/>
-      <rect x="41" y="16" width="16" height="26" rx="7" fill="currentColor"/>
-      <ellipse cx="49" cy="16" rx="8.5" ry="3.5" fill="currentColor" opacity="0.3"/>
-      <circle cx="49" cy="12" r="8.5" fill="currentColor"/>
-    </g>
-    <g transform="rotate(14 71 64)">
-      <rect x="63" y="38" width="16" height="28" rx="7" fill="currentColor"/>
-      <ellipse cx="71" cy="38" rx="9" ry="3.5" fill="currentColor" opacity="0.3"/>
-      <rect x="63" y="10" width="16" height="30" rx="7" fill="currentColor"/>
-      <ellipse cx="71" cy="10" rx="8.5" ry="3.5" fill="currentColor" opacity="0.3"/>
-      <circle cx="71" cy="8" r="8.5" fill="currentColor"/>
+// Compact loading icon: the same V-gradient + light-sweep shimmer as the
+// full-screen splash (see index.html/style.css's .app-splash), just scaled
+// down for inline use inside cards/modals/tab content. Each call gets its
+// own gradient/clipPath id (a random suffix) so multiple loading spots
+// rendering at once -- e.g. the grid and a modal both mid-fetch -- never
+// collide on a duplicate SVG id.
+let loadingVIdCounter = 0;
+function loadingVSvg() {
+  const id = `loadingV${loadingVIdCounter++}`;
+  return `<svg class="loading-v" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">
+    <defs>
+      <linearGradient id="${id}" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0%" stop-color="#8b7bff"/>
+        <stop offset="100%" stop-color="#35c99a"/>
+      </linearGradient>
+      <clipPath id="${id}-clip">
+        <path d="M14 10 L50 82 L86 10 L70 10 L50 54 L30 10 Z"/>
+      </clipPath>
+    </defs>
+    <path fill="url(#${id})" d="M14 10 L50 82 L86 10 L70 10 L50 54 L30 10 Z"/>
+    <g clip-path="url(#${id}-clip)">
+      <rect class="loading-v-shimmer" x="-20" y="-20" width="35" height="140" fill="rgba(255,255,255,0.6)"/>
     </g>
   </svg>`;
 }
 
-// Shared "stats are loading" overlay: the peace-sign hand plus a status
-// message underneath it, dropped in wherever a matchup/splits/odds fetch is
-// in flight (see loadMlbMatchup, loadKboMatchup, openMlbPlayerModal,
+// Shared "stats are loading" overlay: the V icon plus a status message
+// underneath it, dropped in wherever a matchup/splits/odds fetch is in
+// flight (see loadMlbMatchup, loadKboMatchup, openMlbPlayerModal,
 // renderGrid, renderNoVig). Centered block, not a fixed-position overlay
 // over the whole page -- it replaces the loading area's own content the
 // same way the plain "Loading…" text it's superseding did, just with the
 // icon.
 function loadingOverlay(message) {
-  return `<div class="loading-overlay">${loadingHandSvg()}<p class="loading-overlay-text">${message}</p></div>`;
+  return `<div class="loading-overlay">${loadingVSvg()}<p class="loading-overlay-text">${message}</p></div>`;
 }
 
 function saveWatchlist() {
@@ -1341,4 +1330,13 @@ el.kboViewSelect.addEventListener('change', () => {
 });
 
 render();
-loadItems();
+// Once the initial Markets fetch resolves (success or failure -- either
+// way the app has something to show), fade the splash out and remove it
+// from the DOM so it can't intercept clicks or linger behind on repeat
+// theme/layout changes.
+loadItems().finally(() => {
+  const splash = document.getElementById('app-splash');
+  if (!splash) return;
+  splash.classList.add('app-splash-hide');
+  setTimeout(() => splash.remove(), 550);
+});

@@ -403,15 +403,22 @@ body {
   color: var(--accent);
   grid-column: 1 / -1;
 }
-.loading-hand {
-  width: 312px;
-  height: 372px;
-  transform-origin: 50% 100%;
-  animation: loading-hand-wave 1.15s ease-in-out infinite;
+.loading-v {
+  width: 90px;
+  height: 90px;
+  overflow: visible;
+  animation: loading-v-pulse 1.6s ease-in-out infinite;
 }
-@keyframes loading-hand-wave {
-  0%, 100% { transform: rotate(-7deg); }
-  50% { transform: rotate(7deg); }
+@keyframes loading-v-pulse {
+  0%, 100% { transform: scale(1); filter: drop-shadow(0 0 4px rgba(91, 77, 224, 0.35)); }
+  50% { transform: scale(1.06); filter: drop-shadow(0 0 12px rgba(91, 77, 224, 0.55)); }
+}
+.loading-v-shimmer {
+  animation: loading-v-sweep 1.8s ease-in-out infinite;
+}
+@keyframes loading-v-sweep {
+  0% { transform: translateX(-20px) skewX(-18deg); }
+  50%, 100% { transform: translateX(150px) skewX(-18deg); }
 }
 .loading-overlay-text {
   margin: 0;
@@ -420,6 +427,133 @@ body {
   color: var(--text-muted);
   text-align: center;
 }
+
+/* Full-screen splash shown once on initial page load, dismissed by app.js
+   once the first Markets fetch resolves. Dark background regardless of
+   the user's saved theme -- this is a one-time brand moment, not part of
+   the themed UI underneath it -- with the same V-gradient (purple->teal)
+   as the topbar's brand mark, just animated: the outline traces itself
+   in, fills in, then a diagonal light sweeps across it on a loop
+   (the "Netflix logo flash" effect) while the wordmark letters cascade in
+   underneath and a thin progress sliver loops beneath that. */
+.app-splash {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: #0a0b14;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 22px;
+  transition: opacity 0.5s ease, visibility 0.5s ease;
+}
+.app-splash.app-splash-hide {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+.splash-glow {
+  position: absolute;
+  width: 420px;
+  height: 420px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(91, 77, 224, 0.35), rgba(53, 201, 154, 0.12) 45%, transparent 70%);
+  filter: blur(10px);
+  animation: splash-glow-pulse 2.4s ease-in-out infinite;
+}
+@keyframes splash-glow-pulse {
+  0%, 100% { transform: scale(0.92); opacity: 0.7; }
+  50% { transform: scale(1.05); opacity: 1; }
+}
+.splash-v-stage {
+  position: relative;
+  width: 170px;
+  height: 170px;
+  animation: splash-v-breathe 2.4s ease-in-out infinite;
+}
+@keyframes splash-v-breathe {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.035); }
+}
+.splash-v-stage svg { width: 100%; height: 100%; overflow: visible; display: block; }
+.splash-v-path {
+  fill: none;
+  stroke: url(#splashVGrad);
+  stroke-width: 14;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-dasharray: 340;
+  stroke-dashoffset: 340;
+  animation: splash-draw-in 1.1s cubic-bezier(0.4, 0, 0.2, 1) forwards, splash-glow-line 2.4s ease-in-out 1.1s infinite;
+}
+@keyframes splash-draw-in { to { stroke-dashoffset: 0; } }
+@keyframes splash-glow-line {
+  0%, 100% { filter: drop-shadow(0 0 6px rgba(139, 123, 255, 0.5)); }
+  50% { filter: drop-shadow(0 0 16px rgba(139, 123, 255, 0.85)); }
+}
+.splash-v-fill {
+  opacity: 0;
+  animation: splash-fill-in 0.6s ease-out 1s forwards;
+}
+@keyframes splash-fill-in { to { opacity: 1; } }
+.splash-shimmer-bar { animation: splash-sweep 2.6s ease-in-out 1.4s infinite; }
+@keyframes splash-sweep {
+  0% { transform: translateX(-140px) skewX(-18deg); }
+  35%, 100% { transform: translateX(260px) skewX(-18deg); }
+}
+.splash-wordmark {
+  display: flex;
+  gap: 3px;
+  font-family: 'Inter', sans-serif;
+  font-weight: 800;
+  font-size: 20px;
+  letter-spacing: 0.08em;
+  color: #edeef5;
+}
+.splash-wordmark span {
+  opacity: 0;
+  animation: splash-letter-in 0.4s ease-out forwards;
+}
+.splash-wordmark span:nth-child(1) { animation-delay: 1.15s; }
+.splash-wordmark span:nth-child(2) { animation-delay: 1.22s; }
+.splash-wordmark span:nth-child(3) { animation-delay: 1.29s; }
+.splash-wordmark span:nth-child(4) { animation-delay: 1.36s; }
+.splash-wordmark span:nth-child(5) { animation-delay: 1.43s; }
+.splash-wordmark span:nth-child(6) { animation-delay: 1.5s; }
+.splash-wordmark span:nth-child(7) { animation-delay: 1.57s; }
+@keyframes splash-letter-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.splash-progress-track {
+  width: 150px;
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+  opacity: 0;
+  animation: splash-fade-in 0.5s ease-out 1.8s forwards;
+}
+.splash-progress-fill {
+  height: 100%;
+  width: 40%;
+  border-radius: 2px;
+  background: linear-gradient(90deg, #5b4de0, #35c99a);
+  animation: splash-progress-slide 1.4s ease-in-out infinite;
+}
+@keyframes splash-progress-slide {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(250%); }
+}
+.splash-status {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11.5px;
+  color: #6b6f85;
+  opacity: 0;
+  animation: splash-fade-in 0.5s ease-out 1.8s forwards;
+}
+@keyframes splash-fade-in { to { opacity: 1; } }
 
 .app-footer {
   text-align: center;
