@@ -1035,10 +1035,28 @@ def build_kbo_matchup(home_team, away_team):
         # reliability against a small fan-run site that was never built to
         # take bursty concurrent traffic.
         time.sleep(0.3)
-        return p, get_kbo_batter_stats(p["id"], opponent_code)
+        try:
+            return p, get_kbo_batter_stats(p["id"], opponent_code)
+        except UpstreamError as e:
+            # One player hitting a 429/403 that survives the retries inside
+            # _fetch_mykbo_html shouldn't take down the whole matchup card --
+            # seen in production on this server's very first-ever KBO request
+            # (a cold IP mykbostats hadn't seen traffic from before). Skip
+            # just this player (their row won't appear) and let the rest of
+            # the roster's already-successful/cached fetches still return.
+            print(f"[vantage] KBO matchup: {p.get('fullName')} (id {p.get('id')}) failed: {e.message}")
+            return p, None
 
     def side_batters(roster_team_name, opponent_code):
-        roster = get_kbo_roster(roster_team_name)
+        try:
+            roster = get_kbo_roster(roster_team_name)
+        except UpstreamError as e:
+            # Same reasoning as fetch_one below: a roster-page fetch failing
+            # (rate limit, transient bot-check) shouldn't take down the
+            # whole matchup response -- return this side as empty rather
+            # than erroring the other team's side out too.
+            print(f"[vantage] KBO matchup: {roster_team_name} roster failed: {e.message}")
+            return []
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             results = list(pool.map(lambda p: fetch_one(p, opponent_code), roster))
         rows = [{**p, "stats": s} for p, s in results if s is not None]
@@ -1546,8 +1564,18 @@ class Handler(BaseHTTPRequestHandler):
         # The restart kills this very process, so it runs detached with a
         # short delay -- long enough for the response above to actually reach
         # GitHub before systemd tears this process down.
+        #
+        # pip3 install runs on every deploy, not just when requirements.txt
+        # visibly changed -- this is what was missing when cloudscraper was
+        # first added for the KBO feature: the auto-deploy pulled the new
+        # code but never installed the new dependency, so the live server
+        # ran for a while with a working-looking git history but a KBO tab
+        # that 502'd on every request (ModuleNotFoundError uncaught inside
+        # the request handler). Re-running install unconditionally is cheap
+        # once everything's already satisfied (pip no-ops quickly) and means
+        # this class of gap can't recur silently.
         subprocess.Popen(
-            ["bash", "-c", f"sleep 1 && cd {SCRIPT_DIR} && git pull && sudo systemctl restart vantage"],
+            ["bash", "-c", f"sleep 1 && cd {SCRIPT_DIR} && git pull && pip3 install -q -r requirements.txt --user && sudo systemctl restart vantage"],
             start_new_session=True,
         )
 
