@@ -88,6 +88,33 @@ function starIcon(active) {
   </svg>`;
 }
 
+// A hand making a clear peace/V sign -- doubles as a wink at the "V" in
+// Vantage's own logo. Two fingers extended and splayed apart (rotated
+// outward from a shared pivot near the fist) read unambiguously as a V
+// shape even at small sizes; thumb and fist round out the hand so it isn't
+// mistaken for two random bars. Single-color (currentColor) so it inherits
+// --accent and adapts automatically between light/dark themes, same as
+// every other icon in this app.
+function loadingHandSvg() {
+  return `<svg class="loading-hand" viewBox="0 0 100 120" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">
+    <ellipse cx="22" cy="80" rx="11" ry="15" fill="currentColor" transform="rotate(-25 22 80)"/>
+    <rect x="30" y="60" width="40" height="44" rx="17" fill="currentColor"/>
+    <rect class="loading-hand-finger loading-hand-finger-left" x="33" y="12" width="15" height="54" rx="7.5" fill="currentColor" transform="rotate(-16 40.5 60)"/>
+    <rect class="loading-hand-finger loading-hand-finger-right" x="52" y="12" width="15" height="54" rx="7.5" fill="currentColor" transform="rotate(16 59.5 60)"/>
+  </svg>`;
+}
+
+// Shared "stats are loading" overlay: the peace-sign hand plus a status
+// message underneath it, dropped in wherever a matchup/splits/odds fetch is
+// in flight (see loadMlbMatchup, loadKboMatchup, openMlbPlayerModal,
+// renderGrid, renderNoVig). Centered block, not a fixed-position overlay
+// over the whole page -- it replaces the loading area's own content the
+// same way the plain "Loading…" text it's superseding did, just with the
+// icon.
+function loadingOverlay(message) {
+  return `<div class="loading-overlay">${loadingHandSvg()}<p class="loading-overlay-text">${message}</p></div>`;
+}
+
 function saveWatchlist() {
   localStorage.setItem(WATCHLIST_KEY, JSON.stringify([...state.watchlist]));
 }
@@ -415,7 +442,7 @@ function loadMiniForms(items, container) {
 function renderGrid() {
   const items = getFilteredItems();
   el.empty.hidden = items.length !== 0 || state.loading;
-  el.grid.innerHTML = state.loading ? '<p class="empty-state">Loading live odds…</p>' : items.map(renderCard).join('');
+  el.grid.innerHTML = state.loading ? loadingOverlay('Loading live odds…') : items.map(renderCard).join('');
   bindCardEvents(el.grid);
   if (!state.loading) loadMiniForms(items, el.grid);
 }
@@ -796,7 +823,7 @@ function renderMlbPlayerModal() {
 
   let contentHtml;
   if (m.loading) {
-    contentHtml = '<p class="form-note">Loading splits…</p>';
+    contentHtml = loadingOverlay('Loading splits…');
   } else if (m.error) {
     contentHtml = `<p class="form-note">Could not load splits (${m.error}).</p>`;
   } else if (!m.splits) {
@@ -861,7 +888,7 @@ function renderMlbPlayerModal() {
 async function loadMlbMatchup() {
   const game = state.mlbGames.find((g) => gameKey(g) === state.mlbSelectedGameKey);
   if (!game) return;
-  el.mlbMatchupContent.innerHTML = '<p class="form-note">Loading matchup data…</p>';
+  el.mlbMatchupContent.innerHTML = loadingOverlay('Loading matchup data…');
   mlbBatterContext.clear();
   try {
     const [awayName, homeName] = game.matchup.split(' @ ');
@@ -1024,7 +1051,7 @@ function renderKboMatchup() {
 async function loadKboMatchup() {
   const game = state.kboGames.find((g) => gameKey(g) === state.kboSelectedGameKey);
   if (!game) return;
-  el.kboMatchupContent.innerHTML = '<p class="form-note">Loading matchup data… (mykbostats.com is slower than MLB\'s API, this can take a few seconds)</p>';
+  el.kboMatchupContent.innerHTML = loadingOverlay("Loading matchup data… (mykbostats.com is slower than MLB's API, this can take a few seconds)");
   try {
     state.kboData = await fetchKboMatchup(game);
     renderKboMatchup();
@@ -1053,7 +1080,7 @@ async function loadBestNoVig() {
 function renderNoVig() {
   if (state.noVigLoading && state.noVigItems.length === 0) {
     el.noVigEmpty.hidden = true;
-    el.noVigGrid.innerHTML = '<p class="empty-state">Scanning all sports for the best no-vig edges…</p>';
+    el.noVigGrid.innerHTML = loadingOverlay('Scanning all sports for the best no-vig edges…');
     return;
   }
   if (state.noVigError && state.noVigItems.length === 0) {

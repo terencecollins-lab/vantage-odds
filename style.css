@@ -393,6 +393,34 @@ body {
 
 .empty-state { text-align: center; color: var(--text-muted); padding: 60px 0; font-size: 14px; }
 
+.loading-overlay {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 56px 20px;
+  color: var(--accent);
+  grid-column: 1 / -1;
+}
+.loading-hand {
+  width: 52px;
+  height: 62px;
+  transform-origin: 50% 100%;
+  animation: loading-hand-wave 1.15s ease-in-out infinite;
+}
+@keyframes loading-hand-wave {
+  0%, 100% { transform: rotate(-7deg); }
+  50% { transform: rotate(7deg); }
+}
+.loading-overlay-text {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-align: center;
+}
+
 .app-footer {
   text-align: center;
   color: var(--text-muted);
