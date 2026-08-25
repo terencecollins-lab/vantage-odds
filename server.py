@@ -383,18 +383,25 @@ def team_short_name(team_obj):
 
 
 GAME_STARTED_CUTOFF_MINUTES = 60
+# MLB/KBO Matchups' own game pickers still want an already-started game to
+# stay pickable (e.g. to check history mid-game) rather than disappearing
+# the instant it tips off, unlike the main Markets grid's tighter cutoff
+# above -- but genuinely stale, multi-day-old leftovers (e.g. a KBO game
+# from 3 days ago still showing odds-available upstream) shouldn't stay
+# pickable indefinitely either. 24h is generous enough to cover a same-day
+# in-progress game (including a long KBO doubleheader night) while dropping
+# anything from a prior day.
+MATCHUP_PICKER_STARTED_CUTOFF_MINUTES = 24 * 60
 
 
-def _game_started_too_long_ago(starts_at_iso):
-    """True once a game's own start time is more than
-    GAME_STARTED_CUTOFF_MINUTES in the past. Used to drop already-underway
-    games from /api/markets (and therefore from Best No-Vig, and from the
-    MLB/KBO Matchups game pickers, both of which build their game lists
-    from this same endpoint's Moneyline items) -- once a game's well past
-    its start, its pre-game odds/props are stale and not worth continuing
-    to serve, and for MLB/KBO Matchups specifically, no longer offering it
-    as a pickable game means no one can trigger a fresh full-roster scrape
-    against it either.
+def _game_started_too_long_ago(starts_at_iso, cutoff_minutes=GAME_STARTED_CUTOFF_MINUTES):
+    """True once a game's own start time is more than cutoff_minutes in the
+    past. Used to drop stale games from /api/markets: the main Markets grid
+    and Best No-Vig use the tight default (GAME_STARTED_CUTOFF_MINUTES,
+    since once a game's well underway its pre-game odds/props are stale and
+    not worth continuing to serve), while the MLB/KBO Matchups game pickers
+    pass the looser MATCHUP_PICKER_STARTED_CUTOFF_MINUTES instead -- see
+    build_markets and handle_markets.
     """
     if not starts_at_iso:
         return False
@@ -402,27 +409,35 @@ def _game_started_too_long_ago(starts_at_iso):
         starts_at = datetime.datetime.fromisoformat(starts_at_iso.replace("Z", "+00:00"))
     except (ValueError, AttributeError):
         return False
-    return (datetime.datetime.now(datetime.timezone.utc) - starts_at) > datetime.timedelta(minutes=GAME_STARTED_CUTOFF_MINUTES)
+    return (datetime.datetime.now(datetime.timezone.utc) - starts_at) > datetime.timedelta(minutes=cutoff_minutes)
 
 
-def build_markets(events, exclude_started=True):
-    """exclude_started controls whether _game_started_too_long_ago filters
-    out already-underway games. Left True by default for the main Markets
-    grid and Best No-Vig (where a stale in-progress game's props aren't
-    worth showing or fetching mini-form data for), but MLB/KBO Matchups'
-    own game pickers pass exclude_started=False for now -- those tabs still
-    want to offer an already-started game as a pickable matchup, e.g. to
-    check history mid-game, so this filter shouldn't remove it from their
-    dropdowns even though it removes it from the main grid.
+def build_markets(events, started_cutoff_minutes=GAME_STARTED_CUTOFF_MINUTES):
+    """started_cutoff_minutes controls how far in the past a game's start
+    time can be before it's dropped as stale (see _game_started_too_long_ago).
+    The main Markets grid and Best No-Vig use the tight default -- once a
+    game's well underway its pre-game props aren't worth showing or
+    fetching mini-form data for. MLB/KBO Matchups' own game pickers pass
+    the looser MATCHUP_PICKER_STARTED_CUTOFF_MINUTES instead: those tabs
+    still want an already-started game pickable for a while (e.g. to check
+    history mid-game), just not one that's days stale.
     """
     items = []
     for event in events:
         teams = event.get("teams") or {}
         home = team_short_name(teams.get("home"))
         away = team_short_name(teams.get("away"))
+        if event.get("leagueID") == "KBO":
+            # SportsGameOdds sometimes sends short/abbreviated KBO team
+            # strings (e.g. 'GIA', 'BEA') rather than full names -- resolve
+            # through the same matcher build_kbo_matchup uses, so the
+            # Markets grid and the KBO Matchups game picker (built from
+            # these same matchup strings) show full names consistently.
+            home = _resolve_kbo_team_display(home)
+            away = _resolve_kbo_team_display(away)
         matchup = f"{away} @ {home}"
         starts_at = (event.get("status") or {}).get("startsAt")
-        if exclude_started and _game_started_too_long_ago(starts_at):
+        if _game_started_too_long_ago(starts_at, started_cutoff_minutes):
             continue
         players = event.get("players") or {}
         home_team_id = (teams.get("home") or {}).get("teamID")
@@ -1236,6 +1251,26 @@ def _resolve_kbo_team(name):
     raise UpstreamError(400, f"Unrecognized KBO team name from odds feed: '{name}' -- doesn't match any key in KBO_TEAM_ROSTER, even loosely. Add an alias there.")
 
 
+def _resolve_kbo_team_display(name):
+    """Best-effort version of _resolve_kbo_team for cosmetic display only --
+    used to turn whatever short/abbreviated team string SportsGameOdds sent
+    (e.g. 'GIA', 'BEA') into the full name (e.g. 'Lotte Giants', 'Doosan
+    Bears') everywhere a KBO matchup label is shown: the Markets grid's card
+    names, and the KBO Matchups tab's own game picker (which is built from
+    Markets' Moneyline items -- see fetchKboGames in kbo.js). Unlike
+    _resolve_kbo_team, this never raises: an unrecognized name just displays
+    as-is rather than taking down the whole /api/markets response over one
+    KBO team's cosmetic label. The actual KBO Matchups data fetch (once a
+    game is picked) still goes through the raising _resolve_kbo_team inside
+    build_kbo_matchup, so a genuine unmatched-team bug still surfaces there
+    with its usual clear error rather than being silently swallowed."""
+    try:
+        resolved_name, _ = _resolve_kbo_team(name)
+        return resolved_name
+    except UpstreamError:
+        return name
+
+
 def build_kbo_matchup(home_team, away_team):
     home_team, home = _resolve_kbo_team(home_team)
     away_team, away = _resolve_kbo_team(away_team)
@@ -1708,18 +1743,21 @@ class Handler(BaseHTTPRequestHandler):
             return
         qs = urllib.parse.parse_qs(parsed.query)
         league_id = (qs.get("league") or ["NFL"])[0]
-        # Defaults to True (excludes already-started games) for the main
-        # Markets grid and Best No-Vig. MLB/KBO Matchups' game pickers pass
-        # excludeStarted=false explicitly since those tabs still want
-        # already-started games pickable for now -- see build_markets.
+        # Defaults to True (tight cutoff) for the main Markets grid and Best
+        # No-Vig. MLB/KBO Matchups' game pickers pass excludeStarted=false to
+        # get the looser MATCHUP_PICKER_STARTED_CUTOFF_MINUTES instead --
+        # still pickable for a while after a game starts (e.g. to check
+        # history mid-game), but not indefinitely, so multi-day-stale
+        # leftovers still drop out of the dropdown -- see build_markets.
         exclude_started = (qs.get("excludeStarted") or ["true"])[0].lower() != "false"
+        started_cutoff_minutes = GAME_STARTED_CUTOFF_MINUTES if exclude_started else MATCHUP_PICKER_STARTED_CUTOFF_MINUTES
         try:
             data = fetch_events(
                 {"leagueID": league_id, "oddsAvailable": "true", "limit": "12"},
                 cache_ns="markets",
                 ttl=MARKETS_CACHE_TTL,
             )
-            items = build_markets(data.get("data") or [], exclude_started=exclude_started)
+            items = build_markets(data.get("data") or [], started_cutoff_minutes=started_cutoff_minutes)
             coverage_since = get_league_coverage_since(league_id)
             self.send_json(200, {"success": True, "items": items, "coverageSince": coverage_since})
         except UpstreamError as e:

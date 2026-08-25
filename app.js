@@ -686,7 +686,7 @@ const MLB_STAT_TABS = [
   { id: 'hits', label: 'Hits', fields: ['hits'] },
   { id: 'runs', label: 'Runs', fields: ['runs'] },
   { id: 'rbi', label: "RBI's", fields: ['rbi'] },
-  { id: 'hri', label: 'H+R+RBI', fields: ['hits', 'runs', 'rbi'] },
+  { id: 'hri', label: 'H+R+RBI', fields: ['hri'] },
   { id: 'hr', label: 'HRs', fields: ['homeRuns'] },
   { id: 'bb', label: 'Batter Balls', fields: ['walks'] },
   { id: 'k', label: 'Batter Strikes', fields: ['strikeouts'] },
@@ -701,11 +701,16 @@ function mlbHighlightFields(statTabId) {
 // team) and Head 2 Head vs Pitcher view tabs, since both return the same
 // {career, recent, recentSeasons} shape from the backend. Also reused for
 // the single-row {year} Season view tabs by passing just one row.
+function mlbHri(stat) {
+  return (stat.hits ?? 0) + (stat.runs ?? 0) + (stat.rbi ?? 0);
+}
+
 function mlbSplitTable(rows, highlightFields) {
   const fmt = (v) => (v != null ? v.toFixed(3).replace(/^0/, '') : '—');
   const cols = [
     { key: 'plateAppearances', label: 'PA' }, { key: 'atBats', label: 'AB' },
     { key: 'hits', label: 'H' }, { key: 'runs', label: 'R' }, { key: 'rbi', label: 'RBI' },
+    { key: 'hri', label: 'H+R+RBI', compute: mlbHri },
     { key: 'homeRuns', label: 'HR' }, { key: 'walks', label: 'BB' }, { key: 'strikeouts', label: 'K' },
     { key: 'avg', label: 'AVG', rate: true }, { key: 'obp', label: 'OBP', rate: true },
     { key: 'slg', label: 'SLG', rate: true }, { key: 'ops', label: 'OPS', rate: true },
@@ -715,7 +720,7 @@ function mlbSplitTable(rows, highlightFields) {
     .map(({ label, stat }) => {
       if (!stat) return `<tr class="mlb-row-empty"><td class="mlb-window-label">${label}</td><td colspan="${cols.length}">No data</td></tr>`;
       const cells = cols
-        .map((c) => `<td class="${highlightFields.includes(c.key) ? 'mlb-col-highlight' : ''}">${c.rate ? fmt(stat[c.key]) : stat[c.key] ?? 0}</td>`)
+        .map((c) => `<td class="${highlightFields.includes(c.key) ? 'mlb-col-highlight' : ''}">${c.rate ? fmt(stat[c.key]) : c.compute ? c.compute(stat) : stat[c.key] ?? 0}</td>`)
         .join('');
       return `<tr><td class="mlb-window-label">${label}</td>${cells}</tr>`;
     })
@@ -731,12 +736,13 @@ function mlbGameLogTable(games, highlightFields, cap) {
   const cols = [
     { key: 'plateAppearances', label: 'PA' }, { key: 'atBats', label: 'AB' },
     { key: 'hits', label: 'H' }, { key: 'runs', label: 'R' }, { key: 'rbi', label: 'RBI' },
+    { key: 'hri', label: 'H+R+RBI', compute: mlbHri },
     { key: 'homeRuns', label: 'HR' }, { key: 'walks', label: 'BB' }, { key: 'strikeouts', label: 'K' },
   ];
   const headerRow = `<tr><th>Date</th><th>Opp</th>${cols.map((c) => `<th class="${highlightFields.includes(c.key) ? 'mlb-col-highlight' : ''}">${c.label}</th>`).join('')}</tr>`;
   const bodyRows = slice
     .map((g) => {
-      const cells = cols.map((c) => `<td class="${highlightFields.includes(c.key) ? 'mlb-col-highlight' : ''}">${g[c.key] ?? 0}</td>`).join('');
+      const cells = cols.map((c) => `<td class="${highlightFields.includes(c.key) ? 'mlb-col-highlight' : ''}">${c.compute ? c.compute(g) : g[c.key] ?? 0}</td>`).join('');
       return `<tr><td>${g.date || '—'}</td><td>${g.opponent || '—'}</td>${cells}</tr>`;
     })
     .join('');
