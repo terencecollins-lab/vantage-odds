@@ -668,20 +668,16 @@ def get_active_hitters(team_statsapi_id):
     return hitters
 
 
-def get_batter_vs_pitcher(batter_id, pitcher_id):
-    """Aggregates a batter's career plate-appearance-level history against one
-    specific pitcher (MLB's own vsPlayer split) into lifetime counting stats --
-    OPS/AVG/SLG aren't valid to average across seasons, so we sum the raw
-    counting stats and recompute the rate stats from those totals."""
-    url = (
-        f"{MLB_STATS_BASE}/people/{batter_id}/stats"
-        f"?stats=vsPlayer&opposingPlayerId={pitcher_id}&group=hitting"
-    )
-    data = _fetch_mlb_json(url, cache_ns="mlb_vsplayer", ttl=MLB_VSPLAYER_CACHE_TTL)
-    splits = (data.get("stats") or [{}])[0].get("splits") or []
+MLB_RECENT_SEASONS_WINDOW = 3  # "recent" = the batter's last 3 individual MLB seasons vs this pitcher, not last-3-calendar-years -- see get_batter_vs_pitcher
+
+
+def _sum_vsplayer_splits(splits):
+    """Shared aggregation for both the career and recent-seasons views below --
+    OPS/AVG/SLG aren't valid to average across seasons, so this always sums
+    the raw counting stats first and recomputes the rate stats from those
+    totals, never from a per-split rate stat directly."""
     if not splits:
         return None
-
     totals = {"atBats": 0, "hits": 0, "homeRuns": 0, "baseOnBalls": 0, "strikeOuts": 0, "totalBases": 0, "hitByPitch": 0, "sacFlies": 0, "plateAppearances": 0}
     for split in splits:
         stat = split.get("stat") or {}
@@ -702,6 +698,46 @@ def get_batter_vs_pitcher(batter_id, pitcher_id):
     }
 
 
+def get_batter_vs_pitcher(batter_id, pitcher_id):
+    """Two views of a batter's history against one specific pitcher, both
+    built from the same request: "career" (MLB's own precomputed lifetime
+    total -- the 'vsPlayerTotal' block) and "recent" (this batter's last
+    MLB_RECENT_SEASONS_WINDOW individual seasons they've faced this pitcher
+    in at all, summed from the 'vsPlayer' season-by-season block -- NOT the
+    last N calendar years, since a batter/pitcher pair can go years between
+    meetings, e.g. after a trade). Confirmed by hand against the raw API
+    response for Salvador Perez vs. Max Scherzer: the two blocks are
+    internally consistent (summing every season in 'vsPlayer' reproduces
+    'vsPlayerTotal' exactly) -- this was a real user-reported discrepancy
+    against a different source that turned out to be that source only
+    covering a recent subset of a much longer head-to-head history, not a
+    bug in this aggregation."""
+    url = (
+        f"{MLB_STATS_BASE}/people/{batter_id}/stats"
+        f"?stats=vsPlayer&opposingPlayerId={pitcher_id}&group=hitting"
+    )
+    data = _fetch_mlb_json(url, cache_ns="mlb_vsplayer", ttl=MLB_VSPLAYER_CACHE_TTL)
+    stats_blocks = data.get("stats") or []
+
+    def block_splits(type_name):
+        return next((b.get("splits") or [] for b in stats_blocks if (b.get("type") or {}).get("displayName") == type_name), [])
+
+    career_splits = block_splits("vsPlayerTotal")
+    season_splits = block_splits("vsPlayer")
+    # Season strings sort correctly as plain strings ("2011" < "2024"), no
+    # int conversion needed. Only seasons this pair actually met in count
+    # toward the "last N" window -- a season with no meeting is just absent
+    # from season_splits, not a zero-stat entry.
+    recent_seasons = sorted({s.get("season") for s in season_splits if s.get("season")}, reverse=True)[:MLB_RECENT_SEASONS_WINDOW]
+    recent_splits = [s for s in season_splits if s.get("season") in recent_seasons]
+
+    career = _sum_vsplayer_splits(career_splits)
+    recent = _sum_vsplayer_splits(recent_splits)
+    if career is None and recent is None:
+        return None
+    return {"career": career, "recent": recent, "recentSeasons": recent_seasons}
+
+
 def build_mlb_matchup(home_team_id, away_team_id, game_date):
     home_statsapi_id = MLB_TEAM_STATSAPI_ID.get(home_team_id)
     away_statsapi_id = MLB_TEAM_STATSAPI_ID.get(away_team_id)
@@ -716,7 +752,14 @@ def build_mlb_matchup(home_team_id, away_team_id, game_date):
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
             results = list(pool.map(lambda b: (b, get_batter_vs_pitcher(b["id"], pitcher["id"])), hitters))
         rows = [{**b, "stats": s} for b, s in results if s is not None]
-        rows.sort(key=lambda r: r["stats"]["atBats"], reverse=True)
+        # career/recent can each independently be None (e.g. a batter who's
+        # only recently come up won't have any pre-MLB_RECENT_SEASONS_WINDOW
+        # meetings, but could still have a career total if they faced this
+        # pitcher in the minors -- unlikely but keep the sort key defensive).
+        def sort_key(r):
+            career = r["stats"]["career"]
+            return career["atBats"] if career else 0
+        rows.sort(key=sort_key, reverse=True)
         return {"pitcher": pitcher, "batters": rows}
 
     return {

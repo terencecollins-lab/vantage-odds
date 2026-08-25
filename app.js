@@ -632,12 +632,18 @@ async function loadMlbGames() {
   }
 }
 
-function hitterRow(b) {
-  const s = b.stats;
+function hitterStatRow(b, label, s, isFirstRow) {
   const fmt = (v) => (v != null ? v.toFixed(3).replace(/^0/, '') : '—');
-  return `<tr>
-    <td>${b.fullName}</td>
-    <td>${b.position}</td>
+  const nameCell = isFirstRow ? `<td rowspan="2">${b.fullName}</td><td rowspan="2">${b.position}</td>` : '';
+  if (!s) {
+    return `<tr class="mlb-row-empty">${nameCell}<td class="mlb-window-label">${label}</td><td colspan="9">No data</td></tr>`;
+  }
+  // Batter/position cells span both rows so the name isn't repeated --
+  // Career and Recent sit right under each other for the same batter,
+  // easy to compare side by side (well, stacked) at a glance.
+  return `<tr class="${isFirstRow ? '' : 'mlb-recent-row'}">
+    ${nameCell}
+    <td class="mlb-window-label">${label}</td>
     <td>${s.plateAppearances}</td>
     <td>${s.atBats}</td>
     <td>${s.hits}</td>
@@ -649,6 +655,13 @@ function hitterRow(b) {
     <td>${fmt(s.slg)}</td>
     <td>${fmt(s.ops)}</td>
   </tr>`;
+}
+
+function hitterRow(b) {
+  const recentLabel = b.stats.recentSeasons && b.stats.recentSeasons.length
+    ? `Last ${b.stats.recentSeasons.length} szn (${b.stats.recentSeasons[b.stats.recentSeasons.length - 1]}–${b.stats.recentSeasons[0]})`
+    : 'Recent';
+  return hitterStatRow(b, 'Career', b.stats.career, true) + hitterStatRow(b, recentLabel, b.stats.recent, false);
 }
 
 function pitcherCard(title, sideData) {
@@ -663,7 +676,7 @@ function pitcherCard(title, sideData) {
     <p class="mlb-subtitle">${title}</p>
     <div class="mlb-table-wrap">
       <table class="mlb-table">
-        <thead><tr><th>Batter</th><th>Pos</th><th>PA</th><th>AB</th><th>H</th><th>HR</th><th>BB</th><th>K</th><th>AVG</th><th>OBP</th><th>SLG</th><th>OPS</th></tr></thead>
+        <thead><tr><th>Batter</th><th>Pos</th><th>Window</th><th>PA</th><th>AB</th><th>H</th><th>HR</th><th>BB</th><th>K</th><th>AVG</th><th>OBP</th><th>SLG</th><th>OPS</th></tr></thead>
         <tbody>${sideData.batters.map(hitterRow).join('')}</tbody>
       </table>
     </div>
