@@ -21,11 +21,13 @@ const state = {
   loading: true,
   view: 'markets',
   mlbGames: [],
+  mlbSelectedDate: null,
   mlbSelectedGameKey: null,
   mlbLoading: false,
   mlbError: null,
   mlbData: null,
   kboGames: [],
+  kboSelectedDate: null,
   kboSelectedGameKey: null,
   kboView: 'vsOpponent',
   kboLoading: false,
@@ -68,10 +70,12 @@ const el = {
   noVigView: document.getElementById('novig-view'),
   golfView: document.getElementById('golf-view'),
   mlbGameSelect: document.getElementById('mlb-game-select'),
+  mlbDateSelect: document.getElementById('mlb-date-select'),
   mlbMatchupContent: document.getElementById('mlb-matchup-content'),
   viewTabKbo: document.getElementById('view-tab-kbo'),
   kboView: document.getElementById('kbo-matchups-view'),
   kboGameSelect: document.getElementById('kbo-game-select'),
+  kboDateSelect: document.getElementById('kbo-date-select'),
   kboViewSelect: document.getElementById('kbo-view-select'),
   kboMatchupContent: document.getElementById('kbo-matchup-content'),
   noVigGrid: document.getElementById('novig-grid'),
@@ -634,13 +638,57 @@ function gameKey(game) {
   return `${game.matchup}|${game.startsAt}`;
 }
 
-function formatGameLabel(game) {
-  const d = new Date(game.startsAt);
-  const dateLabel = d.toLocaleString(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
-  return `${game.matchup} — ${dateLabel}`;
+// Local-calendar-day key (not a locale-formatted string) purely for
+// grouping/sorting games into the new Date dropdown -- YYYY-MM-DD sorts
+// correctly as a plain string, unlike most locale date formats.
+function localDateKey(iso) {
+  const d = new Date(iso);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function formatDateOnlyLabel(iso) {
+  const d = new Date(iso);
+  return d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+}
+
+function formatTimeOnlyLabel(iso) {
+  const d = new Date(iso);
+  return d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+}
+
+// Builds the Date dropdown's options from whatever games are currently
+// loaded, one option per distinct calendar day (not per game) -- a busy
+// day with 10+ MLB games still collapses to a single date entry.
+function renderMlbDateSelect() {
+  const dateKeys = [...new Set(state.mlbGames.map((g) => localDateKey(g.startsAt)))].sort();
+  el.mlbDateSelect.innerHTML = dateKeys
+    .map((key) => {
+      const sample = state.mlbGames.find((g) => localDateKey(g.startsAt) === key);
+      return `<option value="${key}">${formatDateOnlyLabel(sample.startsAt)}</option>`;
+    })
+    .join('');
+}
+
+// Builds the Game dropdown's options from only the games on
+// state.mlbSelectedDate -- the date's already chosen via the dropdown
+// above, so each option just needs the matchup and kickoff time, not the
+// full date+time formatGameLabel used to show.
+function renderMlbGameSelectForDate() {
+  const gamesForDate = state.mlbGames.filter((g) => localDateKey(g.startsAt) === state.mlbSelectedDate);
+  el.mlbGameSelect.innerHTML = gamesForDate
+    .map((g) => `<option value="${gameKey(g)}">${g.matchup} — ${formatTimeOnlyLabel(g.startsAt)}</option>`)
+    .join('');
+  if (gamesForDate.length) {
+    state.mlbSelectedGameKey = gameKey(gamesForDate[0]);
+    el.mlbGameSelect.value = state.mlbSelectedGameKey;
+  }
 }
 
 async function loadMlbGames() {
+  el.mlbDateSelect.innerHTML = '';
   el.mlbGameSelect.innerHTML = '<option>Loading games…</option>';
   try {
     state.mlbGames = await fetchMlbGames();
@@ -649,9 +697,10 @@ async function loadMlbGames() {
       el.mlbMatchupContent.innerHTML = '';
       return;
     }
-    el.mlbGameSelect.innerHTML = state.mlbGames.map((g) => `<option value="${gameKey(g)}">${formatGameLabel(g)}</option>`).join('');
-    state.mlbSelectedGameKey = gameKey(state.mlbGames[0]);
-    el.mlbGameSelect.value = state.mlbSelectedGameKey;
+    renderMlbDateSelect();
+    state.mlbSelectedDate = localDateKey(state.mlbGames[0].startsAt);
+    el.mlbDateSelect.value = state.mlbSelectedDate;
+    renderMlbGameSelectForDate();
     await loadMlbMatchup();
   } catch (err) {
     el.mlbGameSelect.innerHTML = '<option>Error loading games</option>';
@@ -906,7 +955,29 @@ async function loadMlbMatchup() {
   }
 }
 
+function renderKboDateSelect() {
+  const dateKeys = [...new Set(state.kboGames.map((g) => localDateKey(g.startsAt)))].sort();
+  el.kboDateSelect.innerHTML = dateKeys
+    .map((key) => {
+      const sample = state.kboGames.find((g) => localDateKey(g.startsAt) === key);
+      return `<option value="${key}">${formatDateOnlyLabel(sample.startsAt)}</option>`;
+    })
+    .join('');
+}
+
+function renderKboGameSelectForDate() {
+  const gamesForDate = state.kboGames.filter((g) => localDateKey(g.startsAt) === state.kboSelectedDate);
+  el.kboGameSelect.innerHTML = gamesForDate
+    .map((g) => `<option value="${gameKey(g)}">${g.matchup} — ${formatTimeOnlyLabel(g.startsAt)}</option>`)
+    .join('');
+  if (gamesForDate.length) {
+    state.kboSelectedGameKey = gameKey(gamesForDate[0]);
+    el.kboGameSelect.value = state.kboSelectedGameKey;
+  }
+}
+
 async function loadKboGames() {
+  el.kboDateSelect.innerHTML = '';
   el.kboGameSelect.innerHTML = '<option>Loading games…</option>';
   try {
     state.kboGames = await fetchKboGames();
@@ -915,9 +986,10 @@ async function loadKboGames() {
       el.kboMatchupContent.innerHTML = '';
       return;
     }
-    el.kboGameSelect.innerHTML = state.kboGames.map((g) => `<option value="${gameKey(g)}">${formatGameLabel(g)}</option>`).join('');
-    state.kboSelectedGameKey = gameKey(state.kboGames[0]);
-    el.kboGameSelect.value = state.kboSelectedGameKey;
+    renderKboDateSelect();
+    state.kboSelectedDate = localDateKey(state.kboGames[0].startsAt);
+    el.kboDateSelect.value = state.kboSelectedDate;
+    renderKboGameSelectForDate();
     await loadKboMatchup();
   } catch (err) {
     el.kboGameSelect.innerHTML = '<option>Error loading games</option>';
@@ -1227,9 +1299,19 @@ el.mlbGameSelect.addEventListener('change', () => {
   state.mlbSelectedGameKey = el.mlbGameSelect.value;
   loadMlbMatchup();
 });
+el.mlbDateSelect.addEventListener('change', () => {
+  state.mlbSelectedDate = el.mlbDateSelect.value;
+  renderMlbGameSelectForDate();
+  loadMlbMatchup();
+});
 el.viewTabKbo.addEventListener('click', () => setView('kbo'));
 el.kboGameSelect.addEventListener('change', () => {
   state.kboSelectedGameKey = el.kboGameSelect.value;
+  loadKboMatchup();
+});
+el.kboDateSelect.addEventListener('change', () => {
+  state.kboSelectedDate = el.kboDateSelect.value;
+  renderKboGameSelectForDate();
   loadKboMatchup();
 });
 el.kboViewSelect.addEventListener('change', () => {
