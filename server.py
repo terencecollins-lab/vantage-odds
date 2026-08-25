@@ -412,6 +412,36 @@ def _game_started_too_long_ago(starts_at_iso, cutoff_minutes=GAME_STARTED_CUTOFF
     return (datetime.datetime.now(datetime.timezone.utc) - starts_at) > datetime.timedelta(minutes=cutoff_minutes)
 
 
+KBO_RECENT_GAMES_LOOKBACK_HOURS = 30
+# Long enough to cover a full KBO game day (evening KST first pitch through
+# a late finish, extra innings, or a doubleheader) even accounting for the
+# UTC/KST offset, without reaching back far enough to surface yesterday's
+# games too.
+
+
+def build_kbo_recent_games(events):
+    """Lightweight team/matchup discovery for the KBO Matchups game picker,
+    covering games whose betting markets have already closed (SportsGameOdds
+    stops returning a game from the oddsAvailable=true query the moment its
+    market settles, typically right after the game ends -- so /api/markets
+    alone can't surface 'today's already-played KBO games' no matter how
+    generous our own started-too-long-ago cutoff is; the event itself simply
+    isn't in that query's response anymore). Unlike build_markets, this only
+    needs team names + start time -- no odds data required -- so it works
+    against a finalized=true query instead."""
+    seen = {}
+    for event in events:
+        teams = event.get("teams") or {}
+        home = _resolve_kbo_team_display(team_short_name(teams.get("home")))
+        away = _resolve_kbo_team_display(team_short_name(teams.get("away")))
+        starts_at = (event.get("status") or {}).get("startsAt")
+        if not starts_at:
+            continue
+        matchup = f"{away} @ {home}"
+        seen[f"{matchup}|{starts_at}"] = {"matchup": matchup, "startsAt": starts_at}
+    return list(seen.values())
+
+
 def build_markets(events, started_cutoff_minutes=GAME_STARTED_CUTOFF_MINUTES):
     """started_cutoff_minutes controls how far in the past a game's start
     time can be before it's dropped as stale (see _game_started_too_long_ago).
@@ -1717,6 +1747,8 @@ class Handler(BaseHTTPRequestHandler):
             self.handle_mlb_player_splits(parsed)
         elif parsed.path == "/api/kbo-matchups":
             self.handle_kbo_matchups(parsed)
+        elif parsed.path == "/api/kbo-recent-games":
+            self.handle_kbo_recent_games(parsed)
         elif parsed.path == "/api/best-no-vig":
             self.handle_best_no_vig(parsed)
         elif parsed.path == "/api/golf":
@@ -1905,6 +1937,22 @@ class Handler(BaseHTTPRequestHandler):
         try:
             result = build_mlb_player_splits(batter_id, pitcher_id, opponent_team_id)
             self.send_json(200, {"success": True, **result})
+        except UpstreamError as e:
+            self.send_json(e.status if e.status < 600 else 502, {"success": False, "error": e.message})
+
+    def handle_kbo_recent_games(self, parsed):
+        if not self.require_api_key():
+            return
+        try:
+            now = datetime.datetime.now(datetime.timezone.utc)
+            starts_after = (now - datetime.timedelta(hours=KBO_RECENT_GAMES_LOOKBACK_HOURS)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+            data = fetch_events(
+                {"leagueID": "KBO", "finalized": "true", "startsAfter": starts_after, "limit": "50"},
+                cache_ns="kbo-recent-games",
+                ttl=MARKETS_CACHE_TTL,
+            )
+            games = build_kbo_recent_games(data.get("data") or [])
+            self.send_json(200, {"success": True, "games": games})
         except UpstreamError as e:
             self.send_json(e.status if e.status < 600 else 502, {"success": False, "error": e.message})
 
