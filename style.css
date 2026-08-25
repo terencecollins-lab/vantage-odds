@@ -407,15 +407,36 @@ body {
   width: 90px;
   height: 90px;
   overflow: visible;
-  animation: loading-v-pulse 1.6s ease-in-out infinite;
+  animation: loading-v-pulse 1.6s ease-in-out 0.6s infinite;
 }
+/* Same trace-in-then-fill reveal as the splash's V (see .splash-v-path /
+   .splash-v-fill), just quicker (~0.65s total vs. ~1.6s) since this icon
+   reappears constantly during normal use -- every league switch, every
+   card click -- rather than once per session. */
+.loading-v-trace {
+  fill: none;
+  stroke-width: 12;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-dasharray: 165;
+  stroke-dashoffset: 165;
+  animation: loading-v-draw-in 0.5s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+@keyframes loading-v-draw-in { to { stroke-dashoffset: 0; } }
+.loading-v-fill {
+  opacity: 0;
+  animation: loading-v-fill-in 0.3s ease-out 0.35s forwards;
+}
+@keyframes loading-v-fill-in { to { opacity: 1; } }
 @keyframes loading-v-pulse {
   0%, 100% { transform: scale(1); filter: drop-shadow(0 0 4px rgba(91, 77, 224, 0.35)); }
   50% { transform: scale(1.06); filter: drop-shadow(0 0 12px rgba(91, 77, 224, 0.55)); }
 }
 .loading-v-shimmer {
-  animation: loading-v-sweep 1.8s ease-in-out infinite;
+  opacity: 0;
+  animation: loading-v-shimmer-reveal 0.01s linear 0.6s forwards, loading-v-sweep 1.8s ease-in-out 0.6s infinite;
 }
+@keyframes loading-v-shimmer-reveal { to { opacity: 1; } }
 @keyframes loading-v-sweep {
   0% { transform: translateX(-20px) skewX(-18deg); }
   50%, 100% { transform: translateX(150px) skewX(-18deg); }

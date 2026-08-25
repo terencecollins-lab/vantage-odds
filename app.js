@@ -111,7 +111,8 @@ function loadingVSvg() {
         <path d="M14 10 L50 82 L86 10 L70 10 L50 54 L30 10 Z"/>
       </clipPath>
     </defs>
-    <path fill="url(#${id})" d="M14 10 L50 82 L86 10 L70 10 L50 54 L30 10 Z"/>
+    <path class="loading-v-trace" stroke="url(#${id})" d="M14 10 L50 82 L86 10"/>
+    <path class="loading-v-fill" fill="url(#${id})" d="M14 10 L50 82 L86 10 L70 10 L50 54 L30 10 Z"/>
     <g clip-path="url(#${id}-clip)">
       <rect class="loading-v-shimmer" x="-20" y="-20" width="35" height="140" fill="rgba(255,255,255,0.6)"/>
     </g>
