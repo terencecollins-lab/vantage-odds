@@ -404,8 +404,8 @@ body {
   grid-column: 1 / -1;
 }
 .loading-hand {
-  width: 52px;
-  height: 62px;
+  width: 312px;
+  height: 372px;
   transform-origin: 50% 100%;
   animation: loading-hand-wave 1.15s ease-in-out infinite;
 }

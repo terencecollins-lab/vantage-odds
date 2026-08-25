@@ -92,19 +92,40 @@ function starIcon(active) {
   </svg>`;
 }
 
-// A hand making a clear peace/V sign -- doubles as a wink at the "V" in
-// Vantage's own logo. Two fingers extended and splayed apart (rotated
-// outward from a shared pivot near the fist) read unambiguously as a V
-// shape even at small sizes; thumb and fist round out the hand so it isn't
-// mistaken for two random bars. Single-color (currentColor) so it inherits
-// --accent and adapts automatically between light/dark themes, same as
-// every other icon in this app.
+// A hand making a clear peace/V sign, styled as an original mechanical/
+// robotic design (segmented finger joints, plated fist, banded wrist) --
+// not a copy of any stock photo, built from scratch with basic shapes.
+// Joint rings and knuckle bumps use currentColor at reduced opacity rather
+// than a second hardcoded color, so the whole icon still adapts
+// automatically between light/dark theme like every other icon in the app.
 function loadingHandSvg() {
-  return `<svg class="loading-hand" viewBox="0 0 100 120" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">
-    <ellipse cx="22" cy="80" rx="11" ry="15" fill="currentColor" transform="rotate(-25 22 80)"/>
-    <rect x="30" y="60" width="40" height="44" rx="17" fill="currentColor"/>
-    <rect class="loading-hand-finger loading-hand-finger-left" x="33" y="12" width="15" height="54" rx="7.5" fill="currentColor" transform="rotate(-16 40.5 60)"/>
-    <rect class="loading-hand-finger loading-hand-finger-right" x="52" y="12" width="15" height="54" rx="7.5" fill="currentColor" transform="rotate(16 59.5 60)"/>
+  return `<svg class="loading-hand" viewBox="0 0 120 140" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">
+    <rect x="38" y="108" width="44" height="28" rx="8" fill="currentColor"/>
+    <rect x="38" y="116" width="44" height="3.5" fill="currentColor" opacity="0.3"/>
+    <rect x="38" y="126" width="44" height="3.5" fill="currentColor" opacity="0.3"/>
+    <rect x="28" y="64" width="64" height="48" rx="20" fill="currentColor"/>
+    <circle cx="60" cy="88" r="9" fill="currentColor" opacity="0.3"/>
+    <circle cx="83" cy="70" r="10" fill="currentColor" opacity="0.55"/>
+    <circle cx="95" cy="79" r="8" fill="currentColor" opacity="0.4"/>
+    <g transform="rotate(-32 20 100)">
+      <rect x="12" y="86" width="15" height="20" rx="6.5" fill="currentColor"/>
+      <ellipse cx="19.5" cy="86" rx="8" ry="3" fill="currentColor" opacity="0.3"/>
+      <circle cx="19.5" cy="83" r="7.5" fill="currentColor"/>
+    </g>
+    <g transform="rotate(-14 49 64)">
+      <rect x="41" y="40" width="16" height="26" rx="7" fill="currentColor"/>
+      <ellipse cx="49" cy="40" rx="9" ry="3.5" fill="currentColor" opacity="0.3"/>
+      <rect x="41" y="16" width="16" height="26" rx="7" fill="currentColor"/>
+      <ellipse cx="49" cy="16" rx="8.5" ry="3.5" fill="currentColor" opacity="0.3"/>
+      <circle cx="49" cy="12" r="8.5" fill="currentColor"/>
+    </g>
+    <g transform="rotate(14 71 64)">
+      <rect x="63" y="38" width="16" height="28" rx="7" fill="currentColor"/>
+      <ellipse cx="71" cy="38" rx="9" ry="3.5" fill="currentColor" opacity="0.3"/>
+      <rect x="63" y="10" width="16" height="30" rx="7" fill="currentColor"/>
+      <ellipse cx="71" cy="10" rx="8.5" ry="3.5" fill="currentColor" opacity="0.3"/>
+      <circle cx="71" cy="8" r="8.5" fill="currentColor"/>
+    </g>
   </svg>`;
 }
 
