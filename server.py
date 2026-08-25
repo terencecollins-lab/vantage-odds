@@ -671,14 +671,17 @@ def get_active_hitters(team_statsapi_id):
 MLB_RECENT_SEASONS_WINDOW = 3  # "recent" = the batter's last 3 individual MLB seasons vs this pitcher, not last-3-calendar-years -- see get_batter_vs_pitcher
 
 
-def _sum_vsplayer_splits(splits):
-    """Shared aggregation for both the career and recent-seasons views below --
+def _sum_hitting_splits(splits):
+    """Shared aggregation for career/recent views across BOTH vs-pitcher and
+    vs-team splits (see get_batter_vs_pitcher and get_batter_vs_team) --
     OPS/AVG/SLG aren't valid to average across seasons, so this always sums
     the raw counting stats first and recomputes the rate stats from those
-    totals, never from a per-split rate stat directly."""
+    totals, never from a per-split rate stat directly. Includes runs/rbi
+    (not just the original AVG/OBP/SLG/OPS-oriented set) since the MLB
+    Matchups player-card modal's stat tabs (Runs, RBI's, H+R+RBI) need them."""
     if not splits:
         return None
-    totals = {"atBats": 0, "hits": 0, "homeRuns": 0, "baseOnBalls": 0, "strikeOuts": 0, "totalBases": 0, "hitByPitch": 0, "sacFlies": 0, "plateAppearances": 0}
+    totals = {"atBats": 0, "hits": 0, "runs": 0, "rbi": 0, "homeRuns": 0, "baseOnBalls": 0, "strikeOuts": 0, "totalBases": 0, "hitByPitch": 0, "sacFlies": 0, "plateAppearances": 0}
     for split in splits:
         stat = split.get("stat") or {}
         for key in totals:
@@ -692,9 +695,9 @@ def _sum_vsplayer_splits(splits):
     ops = round(obp + slg, 3) if (obp is not None and slg is not None) else None
 
     return {
-        "atBats": ab, "hits": h, "homeRuns": totals["homeRuns"], "walks": bb,
-        "strikeouts": totals["strikeOuts"], "plateAppearances": pa,
-        "avg": avg, "obp": obp, "slg": slg, "ops": ops,
+        "atBats": ab, "hits": h, "runs": totals["runs"], "rbi": totals["rbi"],
+        "homeRuns": totals["homeRuns"], "walks": bb, "strikeouts": totals["strikeOuts"],
+        "plateAppearances": pa, "avg": avg, "obp": obp, "slg": slg, "ops": ops,
     }
 
 
@@ -731,11 +734,160 @@ def get_batter_vs_pitcher(batter_id, pitcher_id):
     recent_seasons = sorted({s.get("season") for s in season_splits if s.get("season")}, reverse=True)[:MLB_RECENT_SEASONS_WINDOW]
     recent_splits = [s for s in season_splits if s.get("season") in recent_seasons]
 
-    career = _sum_vsplayer_splits(career_splits)
-    recent = _sum_vsplayer_splits(recent_splits)
+    career = _sum_hitting_splits(career_splits)
+    recent = _sum_hitting_splits(recent_splits)
     if career is None and recent is None:
         return None
     return {"career": career, "recent": recent, "recentSeasons": recent_seasons}
+
+
+MLB_VSTEAM_CACHE_TTL = 24 * 60 * 60
+MLB_SEASON_STATS_CACHE_TTL = 6 * 60 * 60  # season totals move daily during the season
+MLB_GAMELOG_CACHE_TTL = 6 * 60 * 60
+
+
+def get_batter_vs_team(batter_id, opposing_team_statsapi_id):
+    """Same shape and approach as get_batter_vs_pitcher just above, but
+    against an entire opposing team's pitching staff rather than one
+    specific starter -- MLB's 'vsTeam'/'vsTeamTotal' split types, following
+    the exact same opposingTeamId-style query param convention as
+    get_batter_vs_pitcher's opposingPlayerId. Powers the MLB Matchups player
+    card modal's 'Head 2 Head' tab (as opposed to 'Head 2 Head vs Pitcher',
+    which stays on get_batter_vs_pitcher/vsPlayer)."""
+    url = (
+        f"{MLB_STATS_BASE}/people/{batter_id}/stats"
+        f"?stats=vsTeam&opposingTeamId={opposing_team_statsapi_id}&group=hitting"
+    )
+    data = _fetch_mlb_json(url, cache_ns="mlb_vsteam", ttl=MLB_VSTEAM_CACHE_TTL)
+    stats_blocks = data.get("stats") or []
+
+    def block_splits(type_name):
+        return next((b.get("splits") or [] for b in stats_blocks if (b.get("type") or {}).get("displayName") == type_name), [])
+
+    career_splits = block_splits("vsTeamTotal")
+    season_splits = block_splits("vsTeam")
+    recent_seasons = sorted({s.get("season") for s in season_splits if s.get("season")}, reverse=True)[:MLB_RECENT_SEASONS_WINDOW]
+    recent_splits = [s for s in season_splits if s.get("season") in recent_seasons]
+
+    career = _sum_hitting_splits(career_splits)
+    recent = _sum_hitting_splits(recent_splits)
+    if career is None and recent is None:
+        return None
+    return {"career": career, "recent": recent, "recentSeasons": recent_seasons}
+
+
+def _parse_rate(v):
+    """MLB's season-stats endpoint returns rate stats as pre-formatted
+    strings like '.275' (no leading zero) rather than numbers -- Python's
+    float() parses that fine directly, this just guards the sentinel/blank
+    values the API uses for 'no at-bats yet' (None, '', '-', '.---')."""
+    if v in (None, "", "-", ".---"):
+        return None
+    try:
+        return round(float(v), 3)
+    except (TypeError, ValueError):
+        return None
+
+
+def get_batter_season_stats(batter_id, season):
+    """One full-season hitting line -- powers the player card modal's
+    '{year} Season' view tabs."""
+    url = f"{MLB_STATS_BASE}/people/{batter_id}/stats?stats=season&season={season}&group=hitting"
+    data = _fetch_mlb_json(url, cache_ns="mlb_season", ttl=MLB_SEASON_STATS_CACHE_TTL)
+    stats_blocks = data.get("stats") or []
+    splits = next((b.get("splits") or [] for b in stats_blocks if (b.get("type") or {}).get("displayName") == "season"), [])
+    if not splits:
+        return None
+    stat = splits[0].get("stat") or {}
+    return {
+        "atBats": stat.get("atBats") or 0,
+        "hits": stat.get("hits") or 0,
+        "runs": stat.get("runs") or 0,
+        "rbi": stat.get("rbi") or 0,
+        "homeRuns": stat.get("homeRuns") or 0,
+        "walks": stat.get("baseOnBalls") or 0,
+        "strikeouts": stat.get("strikeOuts") or 0,
+        "plateAppearances": stat.get("plateAppearances") or 0,
+        "avg": _parse_rate(stat.get("avg")),
+        "obp": _parse_rate(stat.get("obp")),
+        "slg": _parse_rate(stat.get("slg")),
+        "ops": _parse_rate(stat.get("ops")),
+    }
+
+
+def get_batter_game_log(batter_id, season):
+    """Most-recent-first per-game hitting log for one season -- the player
+    card modal's Last 5/10/20 view tabs are just the head of this same list,
+    sliced client-side rather than three separate fetches (same 'fetch once,
+    slice for every window' pattern as the KBO batter game log above)."""
+    url = f"{MLB_STATS_BASE}/people/{batter_id}/stats?stats=gameLog&season={season}&group=hitting"
+    data = _fetch_mlb_json(url, cache_ns="mlb_gamelog", ttl=MLB_GAMELOG_CACHE_TTL)
+    stats_blocks = data.get("stats") or []
+    splits = next((b.get("splits") or [] for b in stats_blocks if (b.get("type") or {}).get("displayName") == "gameLog"), [])
+    games = []
+    for s in splits:
+        stat = s.get("stat") or {}
+        games.append({
+            "date": s.get("date"),
+            "opponent": (s.get("opponent") or {}).get("name"),
+            "atBats": stat.get("atBats") or 0,
+            "hits": stat.get("hits") or 0,
+            "runs": stat.get("runs") or 0,
+            "rbi": stat.get("rbi") or 0,
+            "homeRuns": stat.get("homeRuns") or 0,
+            "walks": stat.get("baseOnBalls") or 0,
+            "strikeouts": stat.get("strikeOuts") or 0,
+            "plateAppearances": stat.get("plateAppearances") or 0,
+        })
+    games.sort(key=lambda g: g["date"] or "", reverse=True)
+    return games
+
+
+def build_mlb_player_splits(batter_id, pitcher_id, opponent_team_key):
+    """Everything the MLB Matchups player-card modal needs for one batter,
+    fetched in one shot when a card is clicked (not eagerly for every
+    batter in a lineup, mirroring the lazy-on-open pattern the Markets
+    tab's modal already uses for its own Recent Form section). Each of the
+    four data sources is independently wrapped -- one source failing (e.g.
+    a rookie with no prior-season splits) shouldn't blank out the rest."""
+    opponent_statsapi_id = MLB_TEAM_STATSAPI_ID.get(opponent_team_key) if opponent_team_key else None
+    current_year = datetime.datetime.now().year
+
+    vs_team = None
+    if opponent_statsapi_id:
+        try:
+            vs_team = get_batter_vs_team(batter_id, opponent_statsapi_id)
+        except UpstreamError as e:
+            print(f"[vantage] mlb-player-splits: vsTeam failed for batter {batter_id}: {e.message}")
+
+    vs_pitcher = None
+    if pitcher_id:
+        try:
+            vs_pitcher = get_batter_vs_pitcher(batter_id, pitcher_id)
+        except UpstreamError as e:
+            print(f"[vantage] mlb-player-splits: vsPitcher failed for batter {batter_id}: {e.message}")
+
+    games = []
+    try:
+        games = get_batter_game_log(batter_id, current_year)
+    except UpstreamError as e:
+        print(f"[vantage] mlb-player-splits: gameLog failed for batter {batter_id}: {e.message}")
+
+    seasons = []
+    for year in (current_year, current_year - 1):
+        try:
+            stats = get_batter_season_stats(batter_id, year)
+        except UpstreamError as e:
+            print(f"[vantage] mlb-player-splits: season {year} failed for batter {batter_id}: {e.message}")
+            stats = None
+        seasons.append({"year": year, "stats": stats})
+
+    return {
+        "vsTeam": vs_team,
+        "vsPitcher": vs_pitcher,
+        "games": games,
+        "seasons": seasons,
+    }
 
 
 def build_mlb_matchup(home_team_id, away_team_id, game_date):
@@ -1526,6 +1678,8 @@ class Handler(BaseHTTPRequestHandler):
             self.handle_game_log(parsed)
         elif parsed.path == "/api/mlb-matchups":
             self.handle_mlb_matchups(parsed)
+        elif parsed.path == "/api/mlb-player-splits":
+            self.handle_mlb_player_splits(parsed)
         elif parsed.path == "/api/kbo-matchups":
             self.handle_kbo_matchups(parsed)
         elif parsed.path == "/api/best-no-vig":
@@ -1692,6 +1846,26 @@ class Handler(BaseHTTPRequestHandler):
 
         try:
             result = build_mlb_matchup(home_team_id, away_team_id, game_date)
+            self.send_json(200, {"success": True, **result})
+        except UpstreamError as e:
+            self.send_json(e.status if e.status < 600 else 502, {"success": False, "error": e.message})
+
+    def handle_mlb_player_splits(self, parsed):
+        qs = urllib.parse.parse_qs(parsed.query)
+
+        def one(key, default=None):
+            return (qs.get(key) or [default])[0]
+
+        batter_id = one("batterID")
+        pitcher_id = one("pitcherID")
+        opponent_team_id = one("opponentTeamID")
+
+        if not batter_id:
+            self.send_json(400, {"success": False, "error": "batterID is required"})
+            return
+
+        try:
+            result = build_mlb_player_splits(batter_id, pitcher_id, opponent_team_id)
             self.send_json(200, {"success": True, **result})
         except UpstreamError as e:
             self.send_json(e.status if e.status < 600 else 502, {"success": False, "error": e.message})

@@ -95,6 +95,12 @@ body {
 .mlb-table th:first-child, .mlb-table td:first-child { text-align: left; }
 .mlb-table td { padding: 8px 10px; border-bottom: 1px solid var(--border); text-align: right; font-family: 'JetBrains Mono', monospace; }
 .mlb-table td:nth-child(2) { font-family: inherit; color: var(--text-muted); }
+.mlb-player-grid { margin-top: 6px; }
+.mlb-player-card { cursor: pointer; }
+.mlb-tab-group { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 16px; }
+.mlb-view-tab-group { margin-top: 8px; margin-bottom: 4px; }
+.mlb-modal-body { margin-top: 14px; }
+.mlb-col-highlight { background: var(--accent-soft); font-weight: 700; }
 .kbo-batter-gamelog { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); }
 .kbo-batter-gamelog:first-of-type { margin-top: 0; padding-top: 0; border-top: none; }
 .kbo-batter-gamelog h4 { margin: 0 0 8px; font-size: 14px; }

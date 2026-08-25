@@ -1,6 +1,6 @@
 import { LEAGUES, LEAGUE_GROUPS, MARKET_TYPES, fetchLiveItems, fetchMarketsRaw, fetchBestNoVig, fetchGolf, fetchGameLog, formatAmerican } from './odds.js';
 import { SAMPLE_ITEMS } from './sample-odds.js';
-import { fetchMlbGames, fetchMlbMatchup } from './mlb.js';
+import { fetchMlbGames, fetchMlbMatchup, fetchMlbPlayerSplits } from './mlb.js';
 import { fetchKboGames, fetchKboMatchup } from './kbo.js';
 
 const WATCHLIST_KEY = 'vantage.watchlist';
@@ -632,68 +632,242 @@ async function loadMlbGames() {
   }
 }
 
-function hitterStatRow(b, label, s, isFirstRow) {
+// batter.id (string, from card dataset) -> { batter, pitcherId, opponentTeamID } --
+// populated whenever pitcherCard renders a lineup, read back when a card is
+// clicked. A plain module-level Map rather than embedding everything in
+// data-* attributes, since pitcherId/opponentTeamID are shared context for a
+// whole side's lineup, not per-card values worth re-serializing into the DOM.
+const mlbBatterContext = new Map();
+
+function mlbBatterCard(b) {
+  const c = b.stats && b.stats.career;
   const fmt = (v) => (v != null ? v.toFixed(3).replace(/^0/, '') : '—');
-  const nameCell = isFirstRow ? `<td rowspan="2">${b.fullName}</td><td rowspan="2">${b.position}</td>` : '';
-  if (!s) {
-    return `<tr class="mlb-row-empty">${nameCell}<td class="mlb-window-label">${label}</td><td colspan="9">No data</td></tr>`;
-  }
-  // Batter/position cells span both rows so the name isn't repeated --
-  // Career and Recent sit right under each other for the same batter,
-  // easy to compare side by side (well, stacked) at a glance.
-  return `<tr class="${isFirstRow ? '' : 'mlb-recent-row'}">
-    ${nameCell}
-    <td class="mlb-window-label">${label}</td>
-    <td>${s.plateAppearances}</td>
-    <td>${s.atBats}</td>
-    <td>${s.hits}</td>
-    <td>${s.homeRuns}</td>
-    <td>${s.walks}</td>
-    <td>${s.strikeouts}</td>
-    <td>${fmt(s.avg)}</td>
-    <td>${fmt(s.obp)}</td>
-    <td>${fmt(s.slg)}</td>
-    <td>${fmt(s.ops)}</td>
-  </tr>`;
+  const snapshot = c
+    ? `${fmt(c.avg)} AVG vs. this pitcher (career) · ${c.homeRuns ?? 0} HR`
+    : 'Tap for full splits & recent form';
+  return `<article class="item-card mlb-player-card" data-batter-id="${b.id}">
+    <div class="card-top"><span class="card-category">${b.position || 'Batter'}</span></div>
+    <div class="item-name">${b.fullName}</div>
+    <div class="rating-row">${snapshot}</div>
+  </article>`;
 }
 
-function hitterRow(b) {
-  const recentLabel = b.stats.recentSeasons && b.stats.recentSeasons.length
-    ? `Last ${b.stats.recentSeasons.length} szn (${b.stats.recentSeasons[b.stats.recentSeasons.length - 1]}–${b.stats.recentSeasons[0]})`
-    : 'Recent';
-  return hitterStatRow(b, 'Career', b.stats.career, true) + hitterStatRow(b, recentLabel, b.stats.recent, false);
-}
-
-function pitcherCard(title, sideData) {
+function pitcherCard(title, sideData, opponentTeamID) {
   if (!sideData) {
     return `<div class="mlb-pitcher-card"><h3>${title}</h3><p class="mlb-subtitle">Probable pitcher not yet announced.</p></div>`;
   }
   if (sideData.batters.length === 0) {
     return `<div class="mlb-pitcher-card"><h3>${sideData.pitcher.fullName}</h3><p class="mlb-subtitle">No career at-bats found against this lineup.</p></div>`;
   }
+  sideData.batters.forEach((b) => {
+    mlbBatterContext.set(String(b.id), { batter: b, pitcherId: sideData.pitcher.id, opponentTeamID });
+  });
   return `<div class="mlb-pitcher-card">
     <h3>${sideData.pitcher.fullName}</h3>
     <p class="mlb-subtitle">${title}</p>
-    <div class="mlb-table-wrap">
-      <table class="mlb-table">
-        <thead><tr><th>Batter</th><th>Pos</th><th>Window</th><th>PA</th><th>AB</th><th>H</th><th>HR</th><th>BB</th><th>K</th><th>AVG</th><th>OBP</th><th>SLG</th><th>OPS</th></tr></thead>
-        <tbody>${sideData.batters.map(hitterRow).join('')}</tbody>
-      </table>
-    </div>
+    <div class="card-grid mlb-player-grid">${sideData.batters.map(mlbBatterCard).join('')}</div>
   </div>`;
+}
+
+function bindMlbPlayerCards() {
+  el.mlbMatchupContent.querySelectorAll('[data-batter-id]').forEach((card) => {
+    card.addEventListener('click', () => {
+      const ctx = mlbBatterContext.get(card.dataset.batterId);
+      if (ctx) openMlbPlayerModal(ctx.batter, ctx.pitcherId, ctx.opponentTeamID);
+    });
+  });
+}
+
+// Stat-category tabs: which column(s) get highlighted in whichever
+// view-tab's table is currently showing. 'hri' has no single underlying
+// field -- it's Hits+Runs+RBI combined, so it highlights all three source
+// columns at once rather than introducing a synthetic column of its own.
+const MLB_STAT_TABS = [
+  { id: 'hits', label: 'Hits', fields: ['hits'] },
+  { id: 'runs', label: 'Runs', fields: ['runs'] },
+  { id: 'rbi', label: "RBI's", fields: ['rbi'] },
+  { id: 'hri', label: 'H+R+RBI', fields: ['hits', 'runs', 'rbi'] },
+  { id: 'hr', label: 'HRs', fields: ['homeRuns'] },
+  { id: 'bb', label: 'Batter Balls', fields: ['walks'] },
+  { id: 'k', label: 'Batter Strikes', fields: ['strikeouts'] },
+  { id: 'pa', label: 'Plate Appearance', fields: ['plateAppearances'] },
+];
+
+function mlbHighlightFields(statTabId) {
+  return (MLB_STAT_TABS.find((t) => t.id === statTabId) || {}).fields || [];
+}
+
+// Career/recent-style aggregate table -- used by both the Head 2 Head (vs
+// team) and Head 2 Head vs Pitcher view tabs, since both return the same
+// {career, recent, recentSeasons} shape from the backend. Also reused for
+// the single-row {year} Season view tabs by passing just one row.
+function mlbSplitTable(rows, highlightFields) {
+  const fmt = (v) => (v != null ? v.toFixed(3).replace(/^0/, '') : '—');
+  const cols = [
+    { key: 'plateAppearances', label: 'PA' }, { key: 'atBats', label: 'AB' },
+    { key: 'hits', label: 'H' }, { key: 'runs', label: 'R' }, { key: 'rbi', label: 'RBI' },
+    { key: 'homeRuns', label: 'HR' }, { key: 'walks', label: 'BB' }, { key: 'strikeouts', label: 'K' },
+    { key: 'avg', label: 'AVG', rate: true }, { key: 'obp', label: 'OBP', rate: true },
+    { key: 'slg', label: 'SLG', rate: true }, { key: 'ops', label: 'OPS', rate: true },
+  ];
+  const headerRow = `<tr><th>Window</th>${cols.map((c) => `<th class="${highlightFields.includes(c.key) ? 'mlb-col-highlight' : ''}">${c.label}</th>`).join('')}</tr>`;
+  const bodyRows = rows
+    .map(({ label, stat }) => {
+      if (!stat) return `<tr class="mlb-row-empty"><td class="mlb-window-label">${label}</td><td colspan="${cols.length}">No data</td></tr>`;
+      const cells = cols
+        .map((c) => `<td class="${highlightFields.includes(c.key) ? 'mlb-col-highlight' : ''}">${c.rate ? fmt(stat[c.key]) : stat[c.key] ?? 0}</td>`)
+        .join('');
+      return `<tr><td class="mlb-window-label">${label}</td>${cells}</tr>`;
+    })
+    .join('');
+  return `<div class="mlb-table-wrap"><table class="mlb-table"><thead>${headerRow}</thead><tbody>${bodyRows}</tbody></table></div>`;
+}
+
+// Per-game log table -- used by the Last 5/10/20 view tabs, all three
+// sliced from the same fetched games array (see fetchMlbPlayerSplits).
+function mlbGameLogTable(games, highlightFields, cap) {
+  if (!games || !games.length) return '<p class="form-note">No games in this window.</p>';
+  const slice = games.slice(0, cap);
+  const cols = [
+    { key: 'plateAppearances', label: 'PA' }, { key: 'atBats', label: 'AB' },
+    { key: 'hits', label: 'H' }, { key: 'runs', label: 'R' }, { key: 'rbi', label: 'RBI' },
+    { key: 'homeRuns', label: 'HR' }, { key: 'walks', label: 'BB' }, { key: 'strikeouts', label: 'K' },
+  ];
+  const headerRow = `<tr><th>Date</th><th>Opp</th>${cols.map((c) => `<th class="${highlightFields.includes(c.key) ? 'mlb-col-highlight' : ''}">${c.label}</th>`).join('')}</tr>`;
+  const bodyRows = slice
+    .map((g) => {
+      const cells = cols.map((c) => `<td class="${highlightFields.includes(c.key) ? 'mlb-col-highlight' : ''}">${g[c.key] ?? 0}</td>`).join('');
+      return `<tr><td>${g.date || '—'}</td><td>${g.opponent || '—'}</td>${cells}</tr>`;
+    })
+    .join('');
+  return `<div class="mlb-table-wrap"><table class="mlb-table"><thead>${headerRow}</thead><tbody>${bodyRows}</tbody></table></div>`;
+}
+
+const MLB_VIEW_TAB_IDS = ['h2h', 'h2hPitcher', 'last5', 'last10', 'last20', 'season0', 'season1'];
+
+async function openMlbPlayerModal(batter, pitcherId, opponentTeamID) {
+  // Selected tabs persist across different batters/cards within the same
+  // session -- clicking through a lineup keeps whatever stat/view you were
+  // just looking at instead of resetting every time.
+  const prevStatTab = state.mlbPlayerModal ? state.mlbPlayerModal.statTab : 'hits';
+  const prevViewTab = state.mlbPlayerModal ? state.mlbPlayerModal.viewTab : 'h2h';
+  state.mlbPlayerModal = { batter, statTab: prevStatTab, viewTab: prevViewTab, splits: null, loading: true, error: null };
+  el.modalBackdrop.hidden = false;
+  renderMlbPlayerModal();
+  try {
+    const splits = await fetchMlbPlayerSplits({ batterID: batter.id, pitcherID: pitcherId, opponentTeamID });
+    state.mlbPlayerModal.splits = splits;
+  } catch (err) {
+    state.mlbPlayerModal.error = err.message;
+  }
+  state.mlbPlayerModal.loading = false;
+  renderMlbPlayerModal();
+}
+
+function renderMlbPlayerModal() {
+  const m = state.mlbPlayerModal;
+  if (!m) return;
+  const highlightFields = mlbHighlightFields(m.statTab);
+  const seasons = (m.splits && m.splits.seasons) || [];
+
+  const statTabsHtml = MLB_STAT_TABS.map(
+    (t) => `<button class="category-chip ${m.statTab === t.id ? 'active' : ''}" data-stat-tab="${t.id}">${t.label}</button>`
+  ).join('');
+
+  const seasonLabel = (idx) => (seasons[idx] && seasons[idx].year ? `${seasons[idx].year} Season` : idx === 0 ? 'This Season' : 'Last Season');
+  const viewTabDefs = [
+    { id: 'h2h', label: 'Head 2 Head' },
+    { id: 'h2hPitcher', label: 'Head 2 Head vs Pitcher' },
+    { id: 'last5', label: 'Last 5' },
+    { id: 'last10', label: 'Last 10' },
+    { id: 'last20', label: 'Last 20' },
+    { id: 'season0', label: seasonLabel(0) },
+    { id: 'season1', label: seasonLabel(1) },
+  ];
+  const viewTabsHtml = viewTabDefs
+    .map((t) => `<button class="category-chip ${m.viewTab === t.id ? 'active' : ''}" data-view-tab="${t.id}">${t.label}</button>`)
+    .join('');
+
+  let contentHtml;
+  if (m.loading) {
+    contentHtml = '<p class="form-note">Loading splits…</p>';
+  } else if (m.error) {
+    contentHtml = `<p class="form-note">Could not load splits (${m.error}).</p>`;
+  } else if (!m.splits) {
+    contentHtml = '<p class="form-note">No data available.</p>';
+  } else if (m.viewTab === 'h2h') {
+    const v = m.splits.vsTeam;
+    contentHtml = v
+      ? mlbSplitTable(
+          [
+            { label: 'Career', stat: v.career },
+            { label: v.recentSeasons && v.recentSeasons.length ? `Last ${v.recentSeasons.length} szn` : 'Recent', stat: v.recent },
+          ],
+          highlightFields
+        )
+      : '<p class="form-note">No career at-bats found against this opponent.</p>';
+  } else if (m.viewTab === 'h2hPitcher') {
+    const v = m.splits.vsPitcher;
+    contentHtml = v
+      ? mlbSplitTable(
+          [
+            { label: 'Career', stat: v.career },
+            { label: v.recentSeasons && v.recentSeasons.length ? `Last ${v.recentSeasons.length} szn` : 'Recent', stat: v.recent },
+          ],
+          highlightFields
+        )
+      : '<p class="form-note">No career at-bats found against this pitcher (or a probable pitcher hasn\'t been announced yet).</p>';
+  } else if (m.viewTab === 'last5' || m.viewTab === 'last10' || m.viewTab === 'last20') {
+    const cap = { last5: 5, last10: 10, last20: 20 }[m.viewTab];
+    contentHtml = mlbGameLogTable(m.splits.games, highlightFields, cap);
+  } else {
+    const idx = m.viewTab === 'season0' ? 0 : 1;
+    const season = seasons[idx];
+    contentHtml = season
+      ? mlbSplitTable([{ label: `${season.year}`, stat: season.stats }], highlightFields)
+      : '<p class="form-note">No season data available.</p>';
+  }
+
+  el.modalContent.innerHTML = `
+    <button class="modal-close" id="modal-close">&times;</button>
+    <span class="card-category">MLB · Batter</span>
+    <h2>${m.batter.fullName}</h2>
+    <div class="rating-row">${m.batter.position || ''}</div>
+    <div class="mlb-tab-group">${statTabsHtml}</div>
+    <div class="mlb-tab-group mlb-view-tab-group">${viewTabsHtml}</div>
+    <div class="mlb-modal-body">${contentHtml}</div>
+  `;
+  document.getElementById('modal-close').addEventListener('click', closeModal);
+  el.modalContent.querySelectorAll('[data-stat-tab]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      state.mlbPlayerModal.statTab = btn.dataset.statTab;
+      renderMlbPlayerModal();
+    });
+  });
+  el.modalContent.querySelectorAll('[data-view-tab]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      state.mlbPlayerModal.viewTab = btn.dataset.viewTab;
+      renderMlbPlayerModal();
+    });
+  });
 }
 
 async function loadMlbMatchup() {
   const game = state.mlbGames.find((g) => gameKey(g) === state.mlbSelectedGameKey);
   if (!game) return;
   el.mlbMatchupContent.innerHTML = '<p class="form-note">Loading matchup data…</p>';
+  mlbBatterContext.clear();
   try {
     const [awayName, homeName] = game.matchup.split(' @ ');
     const data = await fetchMlbMatchup(game);
     state.mlbData = data;
+    // Away hitters face the home team's pitcher, so their Head 2 Head
+    // (vs-team) view should compare them against the HOME team -- and
+    // vice versa for home hitters vs. the away team.
     el.mlbMatchupContent.innerHTML =
-      pitcherCard(`vs. ${awayName} hitters`, data.homePitcherVsAwayHitters) +
-      pitcherCard(`vs. ${homeName} hitters`, data.awayPitcherVsHomeHitters);
+      pitcherCard(`vs. ${awayName} hitters`, data.homePitcherVsAwayHitters, game.homeTeamID) +
+      pitcherCard(`vs. ${homeName} hitters`, data.awayPitcherVsHomeHitters, game.awayTeamID);
+    bindMlbPlayerCards();
   } catch (err) {
     el.mlbMatchupContent.innerHTML = `<p class="form-note">Could not load matchup data (${err.message}).</p>`;
   }

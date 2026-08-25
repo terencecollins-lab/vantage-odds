@@ -42,3 +42,19 @@ export async function fetchMlbMatchup(game) {
   }
   return json; // { homePitcherVsAwayHitters, awayPitcherVsHomeHitters }
 }
+
+// Fetched once per batter, lazily, when their player card is opened -- not
+// eagerly for a whole lineup up front. Covers every view tab the player card
+// modal offers except Last 5/10/20 (those are the same 'games' array sliced
+// client-side to different lengths, not three separate requests).
+export async function fetchMlbPlayerSplits({ batterID, pitcherID, opponentTeamID }) {
+  const params = new URLSearchParams({ batterID });
+  if (pitcherID) params.set('pitcherID', pitcherID);
+  if (opponentTeamID) params.set('opponentTeamID', opponentTeamID);
+  const res = await fetch(`/api/mlb-player-splits?${params.toString()}`);
+  const json = await res.json();
+  if (!res.ok || json.success === false) {
+    throw new Error(json.error || `Request failed (${res.status})`);
+  }
+  return json; // { vsTeam, vsPitcher, games, seasons: [{year, stats}, ...] }
+}
