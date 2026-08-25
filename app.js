@@ -705,25 +705,35 @@ async function loadKboGames() {
   }
 }
 
+// AVG-based row tint, matching the KBO Excel workbook's "Batter vs Pitching
+// Team" tab exactly: same 4 thresholds, same 4 colors. There, the whole
+// AB..AVG range gets one shared color driven by the AVG cell; same idea
+// here, applied to the AB/H/R/RBI/HR/AVG cells of each row.
+function kboAvgColor(avg) {
+  if (avg == null) return null;
+  if (avg < 0.3) return '#F4A6A6';
+  if (avg < 0.45) return '#F8CBAD';
+  if (avg < 0.65) return '#FFF2A6';
+  return '#A9D18E';
+}
+
 function kboBatterRow(b) {
   const s = b.stats[state.kboView];
   const fmt = (v) => (v != null ? v.toFixed(3).replace(/^0/, '') : '—');
   if (!s) {
-    return `<tr class="kbo-row-empty"><td>${b.fullName}</td><td colspan="11">No games in this window</td></tr>`;
+    return `<tr class="kbo-row-empty"><td>${b.fullName}</td><td colspan="7">No games in this window</td></tr>`;
   }
+  const bg = kboAvgColor(s.avg);
+  const style = bg ? ` style="background-color:${bg};"` : '';
   return `<tr>
     <td>${b.fullName}</td>
     <td>${s.gamesFound}</td>
-    <td>${s.atBats}</td>
-    <td>${s.hits}</td>
-    <td>${s.runs}</td>
-    <td>${s.rbi}</td>
-    <td>${s.homeRuns}</td>
-    <td>${s.walks}</td>
-    <td>${fmt(s.avg)}</td>
-    <td>${fmt(s.obp)}</td>
-    <td>${fmt(s.slg)}</td>
-    <td>${fmt(s.ops)}</td>
+    <td${style}>${s.atBats}</td>
+    <td${style}>${s.hits}</td>
+    <td${style}>${s.runs}</td>
+    <td${style}>${s.rbi}</td>
+    <td${style}>${s.homeRuns}</td>
+    <td${style}>${fmt(s.avg)}</td>
   </tr>`;
 }
 
@@ -735,7 +745,7 @@ function kboTeamCard(title, batters) {
     <h3>${title}</h3>
     <div class="mlb-table-wrap">
       <table class="mlb-table">
-        <thead><tr><th>Batter</th><th>GP</th><th>AB</th><th>H</th><th>R</th><th>RBI</th><th>HR</th><th>BB</th><th>AVG</th><th>OBP</th><th>SLG</th><th>OPS</th></tr></thead>
+        <thead><tr><th>Batter</th><th>GP</th><th>AB</th><th>H</th><th>R</th><th>RBI</th><th>HR</th><th>AVG</th></tr></thead>
         <tbody>${batters.map(kboBatterRow).join('')}</tbody>
       </table>
     </div>
