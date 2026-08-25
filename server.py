@@ -972,7 +972,7 @@ def _get_kbo_player_games(player_id):
             except ValueError:
                 continue  # a totals/subtotal row, or a blank cell -- skip
             games.append({
-                "opp": opp, "ab": ab, "r": r, "h": h, "hr": hr, "rbi": rbi,
+                "date": date_str, "opp": opp, "ab": ab, "r": r, "h": h, "hr": hr, "rbi": rbi,
                 "doubles": doubles, "triples": triples, "bb": bb, "hbp": hbp,
             })
     _cache_set(cache_key, KBO_GAMELOG_CACHE_TTL, games)
@@ -981,22 +981,42 @@ def _get_kbo_player_games(player_id):
 
 def get_kbo_batter_stats(player_id, opponent_code):
     """One batter's stats in four views, all built from the same fetched
-    game log: career at-bats against opponent_code (vsOpponent), plus
-    last-5/10/20-games recent form regardless of opponent (mirrors the
+    game log: career at-bats against opponent_code (vsOpponent, an
+    aggregate total -- season-long history against one team is naturally a
+    summary, not a short list), plus last-5/10/20-games recent form
+    regardless of opponent, each returned as the actual individual games
+    (oldest-first) rather than combined into one totals line -- mirrors the
     'Last 5-10-20 Games' tab from the original KBO Excel workbook tool,
     which was paused there but is a natural fit here since the per-batter
-    game log is already being fetched for the vs-opponent view). Returns
-    None only if every one of the four views comes back empty -- covers a
-    pitcher id that never bats, so it's dropped from the matchup entirely;
-    a real batter who simply hasn't faced this opponent yet still shows up
-    with vsOpponent: None but real L5/L10/L20 data."""
+    game log is already being fetched for the vs-opponent view. Each
+    last-N view also carries its own "aggregate" (used for sorting batters
+    within a team) alongside the per-game "games" list (used for display).
+    Returns None only if every one of the four views comes back empty --
+    covers a pitcher id that never bats, so it's dropped from the matchup
+    entirely; a real batter who simply hasn't faced this opponent yet
+    still shows up with vsOpponent: None but real L5/L10/L20 games."""
     games = _get_kbo_player_games(player_id)
     vs_opponent = _aggregate_games([g for g in games if opponent_code in g["opp"].upper()])
-    # games list is oldest-first, so "last N" is the tail slice.
-    last5 = _aggregate_games(games[-5:])
-    last10 = _aggregate_games(games[-10:])
-    last20 = _aggregate_games(games[-20:])
-    if vs_opponent is None and last5 is None and last10 is None and last20 is None:
+
+    def recent_window(n):
+        # games list is oldest-first, so "last N" is the tail slice, then
+        # reversed so the display order is most-recent-first (matches how
+        # the vsOpponent-style summaries and the Excel Game Log tab both
+        # read most naturally).
+        window_games = list(reversed(games[-n:]))
+        return {
+            "aggregate": _aggregate_games(window_games),
+            "games": [
+                {"date": g.get("date"), "opp": g["opp"], "ab": g["ab"], "h": g["h"],
+                 "r": g["r"], "rbi": g["rbi"], "hr": g["hr"]}
+                for g in window_games
+            ],
+        }
+
+    last5 = recent_window(5)
+    last10 = recent_window(10)
+    last20 = recent_window(20)
+    if vs_opponent is None and not last5["games"] and not last10["games"] and not last20["games"]:
         return None
     return {"vsOpponent": vs_opponent, "last5": last5, "last10": last10, "last20": last20}
 
@@ -1068,7 +1088,7 @@ def build_kbo_matchup(home_team, away_team):
             vs = r["stats"]["vsOpponent"]
             if vs is not None:
                 return (1, vs["atBats"])
-            l20 = r["stats"]["last20"]
+            l20 = r["stats"]["last20"]["aggregate"]
             return (0, l20["atBats"] if l20 else 0)
         rows.sort(key=sort_key, reverse=True)
         return rows

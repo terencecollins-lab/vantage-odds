@@ -717,11 +717,24 @@ function kboAvgColor(avg) {
   return '#A9D18E';
 }
 
+// Per-game row color, matching the Excel workbook's Game Log tab exactly:
+// same 4 thresholds (on the combined H+R+RBI for that one game), same 4
+// colors. Distinct from kboAvgColor above (which bands a rate stat, AVG)
+// -- this bands a per-game counting-stat total instead, so the boundaries
+// are on whole numbers (0, 1, 2, >2) rather than fractions.
+function kboGameColor(g) {
+  const total = g.h + g.r + g.rbi;
+  if (total < 1) return '#F4A6A6';
+  if (total === 1) return '#F8CBAD';
+  if (total === 2) return '#FFF2A6';
+  return '#A9D18E'; // > 2.5 in the workbook's formula, but totals are always whole numbers so ">2" is equivalent
+}
+
 function kboBatterRow(b) {
-  const s = b.stats[state.kboView];
+  const s = b.stats.vsOpponent;
   const fmt = (v) => (v != null ? v.toFixed(3).replace(/^0/, '') : '—');
   if (!s) {
-    return `<tr class="kbo-row-empty"><td>${b.fullName}</td><td colspan="7">No games in this window</td></tr>`;
+    return `<tr class="kbo-row-empty"><td>${b.fullName}</td><td colspan="7">No career at-bats vs. this opponent</td></tr>`;
   }
   const bg = kboAvgColor(s.avg);
   const style = bg ? ` style="background-color:${bg};"` : '';
@@ -737,7 +750,7 @@ function kboBatterRow(b) {
   </tr>`;
 }
 
-function kboTeamCard(title, batters) {
+function kboVsOpponentCard(title, batters) {
   if (!batters || batters.length === 0) {
     return `<div class="mlb-pitcher-card"><h3>${title}</h3><p class="mlb-subtitle">No data found for this view.</p></div>`;
   }
@@ -750,6 +763,55 @@ function kboTeamCard(title, batters) {
       </table>
     </div>
   </div>`;
+}
+
+// Last 5/10/20 views: an actual per-game list per batter (Date, Opp, AB, H,
+// R, RBI, HR), not a combined totals row -- one small table per batter,
+// mirroring the Excel workbook's Game Log tab layout, including its exact
+// row-coloring rule (see kboGameColor).
+function kboGameRow(g) {
+  const bg = kboGameColor(g);
+  return `<tr style="background-color:${bg};">
+    <td>${g.date || '—'}</td>
+    <td>${g.opp}</td>
+    <td>${g.ab}</td>
+    <td>${g.h}</td>
+    <td>${g.r}</td>
+    <td>${g.rbi}</td>
+    <td>${g.hr}</td>
+  </tr>`;
+}
+
+function kboBatterGameLogBlock(b) {
+  const s = b.stats[state.kboView];
+  if (!s || !s.games.length) {
+    return `<div class="kbo-batter-gamelog"><h4>${b.fullName}</h4><p class="mlb-subtitle">No games in this window.</p></div>`;
+  }
+  return `<div class="kbo-batter-gamelog">
+    <h4>${b.fullName}</h4>
+    <div class="mlb-table-wrap">
+      <table class="mlb-table">
+        <thead><tr><th>Date</th><th>Opp</th><th>AB</th><th>H</th><th>R</th><th>RBI</th><th>HR</th></tr></thead>
+        <tbody>${s.games.map(kboGameRow).join('')}</tbody>
+      </table>
+    </div>
+  </div>`;
+}
+
+function kboGameLogCard(title, batters) {
+  if (!batters || batters.length === 0) {
+    return `<div class="mlb-pitcher-card"><h3>${title}</h3><p class="mlb-subtitle">No data found for this view.</p></div>`;
+  }
+  return `<div class="mlb-pitcher-card">
+    <h3>${title}</h3>
+    ${batters.map(kboBatterGameLogBlock).join('')}
+  </div>`;
+}
+
+function kboTeamCard(title, batters) {
+  return state.kboView === 'vsOpponent'
+    ? kboVsOpponentCard(title, batters)
+    : kboGameLogCard(title, batters);
 }
 
 function renderKboMatchup() {
