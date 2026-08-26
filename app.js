@@ -571,10 +571,95 @@ function coverageNote(coverage, gamesPlayed, item) {
   return `Scanned all ${coverage.eventsScanned} finalized games back to ${dateLabel} (${gamesPlayed} ${subject}).${seasonCaveat}`;
 }
 
+// Leagues where "Team A @ Team B" is really "Player A vs. Player B" -- a 1-
+// on-1 individual matchup, not two separate teams. For these, a
+// Moneyline/Spread item's Recent Form should show BOTH players side by
+// side (each one's own win/margin history), not just whichever side this
+// particular betting line happens to be quoting -- unlike a genuine team
+// sport, where the other side's recent form is a separate, differently-
+// keyed set of cards entirely.
+const INDIVIDUAL_SPORT_LEAGUES = new Set(['ATP', 'WTA', 'UFC']);
+
+function isHeadToHeadIndividualMarket(item) {
+  return INDIVIDUAL_SPORT_LEAGUES.has(item.league) && (item.statID === 'team_win' || item.statID === 'team_margin');
+}
+
+// Server always renders non-prop, non-Total names as "{matchup} — {market}
+// ({sideName}{line})" (see build_markets in server.py) -- the trailing
+// parenthetical is exactly the display name of the side this item's line
+// belongs to, e.g. "(J. Fearnley)".
+function parseMoneylineSideName(item) {
+  const match = item.name.match(/\(([^)]+)\)\s*$/);
+  return match ? match[1] : null;
+}
+
+function matchupOtherSideName(item, sideName) {
+  const [awayName, homeName] = item.matchup.split(' @ ');
+  if (sideName === homeName) return awayName;
+  if (sideName === awayName) return homeName;
+  return null;
+}
+
+// For team_margin (spread), the two players' lines are mirror images of
+// each other (home -3.5 <=> away +3.5) -- reusing isHit/formGuideDots/
+// hitRateLabel/recentFormCaption for the OTHER player needs their line
+// negated, or a "covered" dot would be checking the wrong side's number.
+// team_win needs no such adjustment (isHit for it never reads item.line).
+function otherSideHitTestItem(item) {
+  if (item.statID === 'team_margin' && item.line != null) {
+    return { ...item, line: -Number(item.line) };
+  }
+  return item;
+}
+
+function playerFormBlock(label, games, h2h, coverage, hitTestItem, displayItem) {
+  const last5 = games.slice(0, 5);
+  const last10 = games.slice(0, 10);
+  const last5H2H = h2h.slice(0, 5);
+  return `
+    <div class="recent-form-player">
+      <h4>${label}</h4>
+      <div class="form-row"><span class="form-label">Last 5</span><span class="form-dots">${formGuideDots(last5, hitTestItem)}</span><span class="form-rate">${hitRateLabel(last5, hitTestItem)}</span></div>
+      <div class="form-row"><span class="form-label">Last 10</span><span class="form-dots">${formGuideDots(last10, hitTestItem)}</span><span class="form-rate">${hitRateLabel(last10, hitTestItem)}</span></div>
+      <div class="form-row"><span class="form-label">All seasons</span><span class="form-dots">${formGuideDots(games, hitTestItem)}</span><span class="form-rate">${hitRateLabel(games, hitTestItem)}</span></div>
+      <div class="form-row"><span class="form-label">Last 5 H2H</span><span class="form-dots">${formGuideDots(last5H2H, hitTestItem)}</span><span class="form-rate">${hitRateLabel(last5H2H, hitTestItem)}</span></div>
+      <div class="form-row"><span class="form-label">All-time H2H</span><span class="form-dots">${formGuideDots(h2h, hitTestItem)}</span><span class="form-rate">${hitRateLabel(h2h, hitTestItem)}</span></div>
+      <p class="form-note">${recentFormCaption(hitTestItem)}</p>
+      <p class="form-note">${coverageNote(coverage, games.length, displayItem)}</p>
+    </div>`;
+}
+
 async function renderRecentForm(item) {
   const container = document.getElementById('recent-form');
   if (!container) return;
   try {
+    if (isHeadToHeadIndividualMarket(item)) {
+      const sideName = parseMoneylineSideName(item) || 'This side';
+      const otherName = matchupOtherSideName(item, sideName) || 'Opponent';
+      const [primary, secondary] = await Promise.all([
+        fetchGameLog({
+          league: item.league,
+          teamID: item.playerTeamID,
+          playerID: item.playerID,
+          statID: item.statID,
+          opponentTeamID: item.opponentTeamID,
+        }),
+        fetchGameLog({
+          league: item.league,
+          teamID: item.opponentTeamID,
+          playerID: item.playerID,
+          statID: item.statID,
+          opponentTeamID: item.playerTeamID,
+        }),
+      ]);
+      container.innerHTML = `
+        <h3>Recent form</h3>
+        <p class="form-note">Shown separately for each player in this 1-on-1 matchup.</p>
+        ${playerFormBlock(sideName, primary.games, primary.h2h, primary.coverage, item, item)}
+        ${playerFormBlock(otherName, secondary.games, secondary.h2h, secondary.coverage, otherSideHitTestItem(item), item)}
+      `;
+      return;
+    }
     const { games, h2h, coverage } = await fetchGameLog({
       league: item.league,
       teamID: item.playerTeamID,

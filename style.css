@@ -101,6 +101,22 @@ body {
 .mlb-view-tab-group { margin-top: 8px; margin-bottom: 4px; }
 .mlb-modal-body { margin-top: 14px; }
 .mlb-col-highlight { background: var(--accent-soft); font-weight: 700; }
+.recent-form-player {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+.recent-form-player:first-of-type {
+  margin-top: 10px;
+  padding-top: 0;
+  border-top: none;
+}
+.recent-form-player h4 {
+  margin: 0 0 8px;
+  font-size: 14px;
+  font-weight: 700;
+}
+
 .kbo-batter-gamelog { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); }
 .kbo-batter-gamelog:first-of-type { margin-top: 0; padding-top: 0; border-top: none; }
 .kbo-batter-gamelog h4 { margin: 0 0 8px; font-size: 14px; }
