@@ -155,6 +155,29 @@ function movementArrow(openAmerican, currentAmerican) {
   return current > open ? '▲' : '▼';
 }
 
+// Player-prop and Total market names already end in "{market label}
+// {Over|Under} {line}" (see build_markets in server.py), and the market
+// label itself sometimes already contains the word "Over/Under" (e.g. a
+// prop literally named "Total Bases Over/Under") -- so the actual
+// selection can visually disappear right after an near-identical-looking
+// word. This splits the trailing "{Over|Under} {line}" back off (rebuilt
+// from item.side/item.line, the same fields the name was built from) so it
+// can be rendered as its own distinct badge instead of blending into the
+// rest of the name.
+function splitPropSideSuffix(item) {
+  if (item.line == null || (item.side !== 'over' && item.side !== 'under')) return null;
+  const sideLabel = item.side === 'under' ? 'Under' : 'Over';
+  const suffix = ` ${sideLabel} ${item.line}`;
+  if (!item.name.endsWith(suffix)) return null;
+  return { base: item.name.slice(0, -suffix.length), sideLabel, line: item.line };
+}
+
+function formatItemNameHtml(item) {
+  const split = splitPropSideSuffix(item);
+  if (!split) return item.name;
+  return `${split.base} <span class="prop-side-badge">${split.sideLabel} ${split.line}</span>`;
+}
+
 async function loadItems() {
   state.loading = true;
   render();
@@ -311,7 +334,7 @@ function renderCard(item) {
       <span class="card-category">${item.league} · ${item.marketType}</span>
       ${item.isOutlier ? '<span class="outlier-badge">Value edge</span>' : ''}
     </div>
-    <div class="item-name">${item.name}</div>
+    <div class="item-name">${formatItemNameHtml(item)}</div>
     <div class="rating-row">${formatKickoff(item.startsAt)} ${coverageLabel ? `<span class="coverage-badge" title="Earliest finalized-game history SportsGameOdds has for ${item.league} — used for the recent-form stats below">History since ${coverageLabel}</span>` : ''}</div>
     <div class="movement-row">${item.openBookOdds ? `Opened ${formatAmerican(item.openBookOdds)} → Now ${formatAmerican(item.bestPrice)} ${arrow}` : ''}</div>
     ${item.statID ? `<div class="mini-form-slot mini-form-loading" data-mini="${item.id}">Loading recent form…</div>` : ''}
@@ -485,7 +508,7 @@ function openModal(id) {
   el.modalContent.innerHTML = `
     <button class="modal-close" id="modal-close">&times;</button>
     <span class="card-category">${item.league} · ${item.marketType}</span>
-    <h2>${item.name}</h2>
+    <h2>${formatItemNameHtml(item)}</h2>
     <div class="rating-row">${formatKickoff(item.startsAt)}</div>
     <div class="price-row">
       <span class="best-price">${formatAmerican(item.bestPrice)}</span>

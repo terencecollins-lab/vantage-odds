@@ -101,6 +101,19 @@ body {
 .mlb-view-tab-group { margin-top: 8px; margin-bottom: 4px; }
 .mlb-modal-body { margin-top: 14px; }
 .mlb-col-highlight { background: var(--accent-soft); font-weight: 700; }
+.prop-side-badge {
+  display: inline-block;
+  margin-left: 5px;
+  padding: 2px 9px;
+  border-radius: 6px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 800;
+  font-size: 0.82em;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
 .recent-form-player {
   margin-top: 18px;
   padding-top: 14px;
