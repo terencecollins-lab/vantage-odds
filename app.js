@@ -396,7 +396,17 @@ function bindCardEvents(container) {
 // Cached client-side by item.id so switching filters/sort/tabs (which
 // re-renders the same cards) never refetches an already-loaded one, even
 // if it's re-observed.
-const MINI_FORM_CONCURRENCY = 4;
+// Concurrency deliberately modest (was 4, lowered after a real slowdown):
+// on a big grid (MLB alone can be 5,000+ items across ~30 different teams),
+// even just the cards visible on first paint can span many distinct teams,
+// each needing its own first-time (cold-cache) game-log fetch. At 4
+// concurrent workers all racing for a shared 8-requests/minute budget right
+// after a cache-wiping deploy, several would end up waiting the rate
+// limiter's full 15s ceiling and surface as "Form unavailable" instead of
+// data. 2 spreads the same total work out more gently, giving each request
+// a better chance of landing within budget instead of several colliding at
+// once.
+const MINI_FORM_CONCURRENCY = 2;
 const miniFormCache = new Map(); // item.id -> { games, h2h } | 'error'
 const miniFormQueue = []; // { item, container }
 let miniFormActiveWorkers = 0;
@@ -443,7 +453,15 @@ const miniFormObserver = new IntersectionObserver(
       }
     }
   },
-  { rootMargin: '400px 0px' } // start loading a bit before it's actually on-screen
+  // 100px, not the original 400px: a smaller margin means fewer cards count
+  // as "about to be visible" on first paint -- on a large grid (MLB alone
+  // can span ~30 different teams), 400px of pre-loading below the fold was
+  // enough to queue up a whole extra row or two of cards immediately,
+  // multiplying how many distinct teams' cold-cache fetches compete for the
+  // shared rate-limit budget right when the page first loads. 100px still
+  // gives fetches a small head start before a card is scrolled fully into
+  // view, just a much smaller one.
+  { rootMargin: '100px 0px' }
 );
 
 function miniFormRow(label, games, item, cap = 5) {
