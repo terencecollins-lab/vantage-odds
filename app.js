@@ -175,7 +175,8 @@ function splitPropSideSuffix(item) {
 function formatItemNameHtml(item) {
   const split = splitPropSideSuffix(item);
   if (!split) return item.name;
-  return `${split.base} <span class="prop-side-badge">${split.sideLabel} ${split.line}</span>`;
+  const sideClass = split.sideLabel === 'Under' ? 'side-under' : 'side-over';
+  return `${split.base} <span class="prop-side-badge ${sideClass}">${split.sideLabel} ${split.line}</span>`;
 }
 
 async function loadItems() {
@@ -733,34 +734,62 @@ function propChartBlock(item, games, h2h, coverage) {
   }
 
   const line = item.line != null ? Number(item.line) : null;
-  const maxVal = Math.max(...chartGames.map((g) => g.statValue ?? 0), line ?? 0, 1) * 1.08;
+  // Against-the-spread margins (and a few other stats) can be negative, so
+  // this can't just scale 0-to-max like a plain counting stat -- bars need
+  // a real zero baseline they can grow either direction from. Including 0
+  // itself in the min/max means an all-positive or all-negative game log
+  // still gets a visible baseline at the right spot, not just at whichever
+  // edge happens to be smallest/largest. A little headroom (12% of the
+  // range) on both ends keeps value labels from being clipped at the very
+  // top or bottom of the plot.
+  const rawValues = chartGames.map((g) => g.statValue ?? 0);
+  const allValues = line != null ? [...rawValues, line, 0] : [...rawValues, 0];
+  const minVal = Math.min(...allValues);
+  const maxVal = Math.max(...allValues);
+  const valueRange = maxVal - minVal || 1;
+  const headroom = valueRange * 0.12;
+  const scaleMin = minVal - headroom;
+  const scaleMax = maxVal + headroom;
+  const scaleRange = scaleMax - scaleMin;
   const chartW = 700;
   const chartH = 220;
   const padX = 8;
-  const padTop = 20;
-  const padBottom = 4;
+  const padTop = 16;
+  const padBottom = 16;
   const plotW = chartW - padX * 2;
   const plotH = chartH - padTop - padBottom;
   const barGap = 4;
   const barW = Math.max(5, plotW / chartGames.length - barGap);
-  const yPos = (v) => padTop + plotH - (v / maxVal) * plotH;
+  const yPos = (v) => padTop + plotH - ((v - scaleMin) / scaleRange) * plotH;
+  const zeroY = yPos(0);
 
   const bars = chartGames
     .map((g, i) => {
       const x = padX + i * (barW + barGap);
       const v = g.statValue ?? 0;
-      const y = yPos(v);
-      const barH = Math.max(padTop + plotH - y, 1);
+      const vY = yPos(v);
+      const isNeg = v < 0;
+      // Bars grow from the zero baseline toward their value in either
+      // direction, rather than always downward from the plot's top edge.
+      const barTop = isNeg ? zeroY : vY;
+      const barBottom = isNeg ? vY : zeroY;
+      const barH = Math.max(barBottom - barTop, 1);
       const hit = isHit(item, g.statValue);
       const cls = hit == null ? 'neutral' : hit ? 'hit' : 'miss';
+      // Label sits above the bar for a positive value, below it for a
+      // negative one, so it's never rendered inside/past the bar itself.
+      const labelY = isNeg ? barBottom + 13 : barTop - 5;
       return `<g class="prop-bar-group" data-idx="${i}">
         <rect class="prop-bar-hit-area" x="${x - barGap / 2}" y="${padTop}" width="${barW + barGap}" height="${plotH}" fill="transparent"/>
-        <rect class="prop-bar ${cls}" x="${x}" y="${y}" width="${barW}" height="${barH}" rx="3"/>
-        <text class="prop-bar-value ${cls}" x="${x + barW / 2}" y="${Math.max(y - 5, 11)}" text-anchor="middle">${v}</text>
+        <rect class="prop-bar ${cls}" x="${x}" y="${barTop}" width="${barW}" height="${barH}" rx="3"/>
+        <text class="prop-bar-value ${cls}" x="${x + barW / 2}" y="${labelY}" text-anchor="middle">${v}</text>
       </g>`;
     })
     .join('');
 
+  const zeroLine = minVal < 0
+    ? `<line class="prop-zero-marker" x1="${padX}" x2="${chartW - padX}" y1="${zeroY}" y2="${zeroY}"/>`
+    : '';
   const dashedLine = line != null
     ? `<line class="prop-line-marker" x1="${padX}" x2="${chartW - padX}" y1="${yPos(line)}" y2="${yPos(line)}"/>`
     : '';
@@ -773,6 +802,7 @@ function propChartBlock(item, games, h2h, coverage) {
     <div class="prop-chart-avgmed">Average: <strong>${avg != null ? avg.toFixed(2) : '—'}</strong> &nbsp; Median: <strong>${median != null ? median : '—'}</strong></div>
     <div class="prop-chart-wrap">
       <svg class="prop-chart-svg" viewBox="0 0 ${chartW} ${chartH}" preserveAspectRatio="none">
+        ${zeroLine}
         ${dashedLine}
         ${bars}
       </svg>

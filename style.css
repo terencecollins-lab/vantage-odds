@@ -102,17 +102,22 @@ body {
 .mlb-modal-body { margin-top: 14px; }
 .mlb-col-highlight { background: var(--accent-soft); font-weight: 700; }
 .prop-side-badge {
-  display: inline-block;
-  margin-left: 5px;
-  padding: 2px 9px;
-  border-radius: 6px;
-  background: var(--accent-soft);
-  color: var(--accent);
+  display: inline-flex;
+  align-items: center;
+  margin-left: 6px;
+  padding: 3px 11px;
+  border-radius: 7px;
   font-weight: 800;
   font-size: 0.82em;
   white-space: nowrap;
   vertical-align: middle;
+  color: white;
+  box-shadow:
+    inset 0 2px 4px rgba(0, 0, 0, 0.28),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.12);
 }
+.prop-side-badge.side-over { background: var(--accent); }
+.prop-side-badge.side-under { background: var(--warn); }
 
 .recent-form-player {
   margin-top: 18px;
@@ -707,7 +712,7 @@ body {
 .prop-chart-avgmed { font-size: 12.5px; color: var(--text-muted); margin: 10px 0; }
 .prop-chart-avgmed strong { color: var(--text); font-family: 'JetBrains Mono', monospace; }
 .prop-chart-wrap { position: relative; }
-.prop-chart-svg { width: 100%; height: 200px; display: block; overflow: visible; }
+.prop-chart-svg { width: 100%; height: 200px; display: block; overflow: hidden; }
 .prop-bar { fill: var(--border); }
 .prop-bar.hit { fill: var(--positive); }
 .prop-bar.miss { fill: var(--negative); }
@@ -716,6 +721,7 @@ body {
 .prop-bar-value.hit { fill: var(--positive); }
 .prop-bar-value.miss { fill: var(--negative); }
 .prop-line-marker { stroke: var(--text-muted); stroke-width: 1.5; stroke-dasharray: 5 4; }
+.prop-zero-marker { stroke: var(--border); stroke-width: 1; }
 .prop-chart-xaxis { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-muted); margin-top: 4px; }
 .prop-chart-tooltip {
   position: absolute;
