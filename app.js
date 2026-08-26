@@ -9,7 +9,7 @@ const THEME_KEY = 'vantage.theme';
 const state = {
   search: '',
   marketType: 'All',
-  sportsbook: 'All',
+  sportsbook: 'PrizePicks',
   statType: 'All',
   league: 'MLB',
   sort: 'edge',
