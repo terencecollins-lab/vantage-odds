@@ -271,16 +271,80 @@ def _get_json(url):
     return parsed
 
 
-def fetch_events(params, cache_ns, ttl):
-    query = urllib.parse.urlencode(params)
-    cache_key = f"{cache_ns}:{query}"
+class _InFlight:
+    """One shared slot for a cache_key currently being fetched -- waiters
+    block on .event and then read .success/.value/.error once the leader
+    (whichever thread got there first) finishes, rather than each
+    independently discovering an empty cache and firing their own
+    duplicate request."""
+    __slots__ = ("event", "success", "value", "error")
+
+    def __init__(self):
+        self.event = threading.Event()
+        self.success = False
+        self.value = None
+        self.error = None
+
+
+_inflight_lock = threading.Lock()
+_inflight = {}  # cache_key -> _InFlight
+
+
+def _coalesced_fetch(cache_key, ttl, fetch_fn):
+    """Runs fetch_fn() and caches the result under cache_key -- but if
+    another thread is already fetching the exact same cache_key, waits for
+    that one to finish and reuses its result instead of duplicating the
+    outbound SportsGameOdds request(s). This matters a lot now that several
+    features can trigger near-simultaneous requests for identical data: the
+    Hit Rate filter's concurrent eager-fetch is the biggest offender (5
+    workers firing at once, and it's common for several different props to
+    share the same team -- e.g. five different Yankees batters' props all
+    need the exact same underlying team game-log). Without this, each of
+    those would independently see an empty cache and re-fetch the identical
+    data, burning scarce rate-limit budget on pure duplication. Every
+    SportsGameOdds-backed fetch helper below (fetch_events, fetch_all_events,
+    fetch_all_events_windowed) routes through this rather than checking
+    _cache directly.
+    """
     cached = _cache.get(cache_key)
     if cached and cached[0] > time.time():
         return cached[1]
 
-    parsed = _get_json(f"{UPSTREAM_BASE}/events?{query}")
-    _cache_set(cache_key, ttl, parsed)
-    return parsed
+    with _inflight_lock:
+        cached = _cache.get(cache_key)
+        if cached and cached[0] > time.time():
+            return cached[1]
+        entry = _inflight.get(cache_key)
+        is_leader = entry is None
+        if is_leader:
+            entry = _InFlight()
+            _inflight[cache_key] = entry
+
+    if not is_leader:
+        entry.event.wait()
+        if entry.success:
+            return entry.value
+        raise entry.error
+
+    try:
+        result = fetch_fn()
+        _cache_set(cache_key, ttl, result)
+        entry.success = True
+        entry.value = result
+        return result
+    except Exception as e:
+        entry.error = e
+        raise
+    finally:
+        with _inflight_lock:
+            _inflight.pop(cache_key, None)
+        entry.event.set()
+
+
+def fetch_events(params, cache_ns, ttl):
+    query = urllib.parse.urlencode(params)
+    cache_key = f"{cache_ns}:{query}"
+    return _coalesced_fetch(cache_key, ttl, lambda: _get_json(f"{UPSTREAM_BASE}/events?{query}"))
 
 
 def fetch_all_events(params, cache_ns, ttl, max_pages=GAME_LOG_MAX_PAGES):
@@ -289,27 +353,25 @@ def fetch_all_events(params, cache_ns, ttl, max_pages=GAME_LOG_MAX_PAGES):
     the requested `limit`, so multi-season history needs real pagination."""
     query = urllib.parse.urlencode(params)
     cache_key = f"{cache_ns}:all:{query}"
-    cached = _cache.get(cache_key)
-    if cached and cached[0] > time.time():
-        return cached[1]
 
-    all_events = []
-    cursor = None
-    for _ in range(max_pages):
-        page_params = dict(params)
-        if cursor:
-            page_params["cursor"] = cursor
-        page = _get_json(f"{UPSTREAM_BASE}/events?{urllib.parse.urlencode(page_params)}")
-        all_events.extend(page.get("data") or [])
-        cursor = page.get("nextCursor")
-        if not cursor:
-            break
+    def do_fetch():
+        all_events = []
+        cursor = None
+        for _ in range(max_pages):
+            page_params = dict(params)
+            if cursor:
+                page_params["cursor"] = cursor
+            page = _get_json(f"{UPSTREAM_BASE}/events?{urllib.parse.urlencode(page_params)}")
+            all_events.extend(page.get("data") or [])
+            cursor = page.get("nextCursor")
+            if not cursor:
+                break
+        return all_events
 
-    _cache_set(cache_key, ttl, all_events)
-    return all_events
+    return _coalesced_fetch(cache_key, ttl, do_fetch)
 
 
-def fetch_all_events_windowed(params, cache_ns, ttl, earliest_iso, window_days=30, max_workers=6):
+def fetch_all_events_windowed(params, cache_ns, ttl, earliest_iso, window_days=90, max_workers=6):
     """Team-scoped variant of fetch_all_events that fans out across date
     windows in parallel instead of walking the cursor sequentially one page
     at a time. Cursor pagination can't be parallelized (each page's cursor
@@ -331,52 +393,57 @@ def fetch_all_events_windowed(params, cache_ns, ttl, earliest_iso, window_days=3
     cards simultaneously). 6 keeps most of the parallel speedup over a
     fully sequential walk while capping the worst case at a much more
     survivable ~24 concurrent connections.
+
+    window_days widened from 30 to 90: fewer, wider windows means fewer
+    total outbound requests to cover the same date range -- roughly a 3x
+    cut in requests-per-team for a full multi-year history scan, directly
+    easing pressure on SGO_RATE_LIMIT_PER_MINUTE. The per-window page cap
+    below is raised to match (a wider window can hold up to ~3x as many
+    games, so it can need up to ~3x as many pages to fully paginate).
     """
     query = urllib.parse.urlencode(params)
     cache_key = f"{cache_ns}:windowed:{query}"
-    cached = _cache.get(cache_key)
-    if cached and cached[0] > time.time():
-        return cached[1]
 
-    try:
-        start = datetime.datetime.fromisoformat(earliest_iso.replace("Z", "+00:00"))
-    except (ValueError, AttributeError, TypeError):
-        start = datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc)
-    end = datetime.datetime.now(datetime.timezone.utc)
+    def do_fetch():
+        try:
+            start = datetime.datetime.fromisoformat(earliest_iso.replace("Z", "+00:00"))
+        except (ValueError, AttributeError, TypeError):
+            start = datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc)
+        end = datetime.datetime.now(datetime.timezone.utc)
 
-    windows = []
-    cursor_dt = start
-    while cursor_dt < end:
-        window_end = min(cursor_dt + datetime.timedelta(days=window_days), end)
-        windows.append((cursor_dt, window_end))
-        cursor_dt = window_end
+        windows = []
+        cursor_dt = start
+        while cursor_dt < end:
+            window_end = min(cursor_dt + datetime.timedelta(days=window_days), end)
+            windows.append((cursor_dt, window_end))
+            cursor_dt = window_end
 
-    def fetch_window(bounds):
-        w_start, w_end = bounds
-        window_params = dict(params)
-        window_params["startsAfter"] = w_start.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-        window_params["startsBefore"] = w_end.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-        events = []
-        cursor = None
-        for _ in range(3):  # a single team in one ~month window shouldn't need more
-            page_params = dict(window_params)
-            if cursor:
-                page_params["cursor"] = cursor
-            page = _get_json(f"{UPSTREAM_BASE}/events?{urllib.parse.urlencode(page_params)}")
-            events.extend(page.get("data") or [])
-            cursor = page.get("nextCursor")
-            if not cursor:
-                break
-        return events
+        def fetch_window(bounds):
+            w_start, w_end = bounds
+            window_params = dict(params)
+            window_params["startsAfter"] = w_start.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+            window_params["startsBefore"] = w_end.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+            events = []
+            cursor = None
+            for _ in range(9):  # a single team in one ~3-month window shouldn't need more
+                page_params = dict(window_params)
+                if cursor:
+                    page_params["cursor"] = cursor
+                page = _get_json(f"{UPSTREAM_BASE}/events?{urllib.parse.urlencode(page_params)}")
+                events.extend(page.get("data") or [])
+                cursor = page.get("nextCursor")
+                if not cursor:
+                    break
+            return events
 
-    all_events = []
-    if windows:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
-            for events in pool.map(fetch_window, windows):
-                all_events.extend(events)
+        all_events = []
+        if windows:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+                for events in pool.map(fetch_window, windows):
+                    all_events.extend(events)
+        return all_events
 
-    _cache_set(cache_key, ttl, all_events)
-    return all_events
+    return _coalesced_fetch(cache_key, ttl, do_fetch)
 
 
 def get_league_coverage_since(league_id):

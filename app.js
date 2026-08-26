@@ -11,7 +11,7 @@ const state = {
   marketType: 'All',
   sportsbook: 'All',
   statType: 'All',
-  league: LEAGUES[0].id,
+  league: 'MLB',
   sort: 'edge',
   watchlistOnly: false,
   watchlist: new Set(JSON.parse(localStorage.getItem(WATCHLIST_KEY) || '[]')),
