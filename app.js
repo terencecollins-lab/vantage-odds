@@ -707,7 +707,129 @@ function propChartQuickStats(item, games, h2h) {
     .join('');
 }
 
+// Shared bar-chart geometry -- the one visual language for "recent form"
+// everywhere in the app: the Markets tab's player-prop chart, the MLB
+// Matchups player modal's Last 5/10/20 views, and the KBO Matchups batter
+// game logs all call this same function rather than each drawing their own
+// bars, so a change here (or a bug fix) applies everywhere at once instead
+// of needing to be repeated three times.
+//
+// `points` must already be in left-to-right (oldest-to-newest) display
+// order. Each point: { value, colorClass, color, label, tooltipHtml }.
+// colorClass is a CSS class ('hit'/'miss'/'neutral', matching .prop-bar.*
+// in style.css); color is an optional inline hex that takes priority over
+// colorClass (used where color comes from real data, like a team's brand
+// color or the KBO workbook's 4-tier AVG bands, rather than a fixed
+// palette). label defaults to the raw value if omitted.
+function buildBarChartSvg(points, { referenceLine = null, height = 220 } = {}) {
+  if (!points.length) return '';
+  const rawValues = points.map((p) => p.value ?? 0);
+  const allValues = referenceLine != null ? [...rawValues, referenceLine, 0] : [...rawValues, 0];
+  const minVal = Math.min(...allValues);
+  const maxVal = Math.max(...allValues);
+  const valueRange = maxVal - minVal || 1;
+  const headroom = valueRange * 0.12;
+  const scaleMin = minVal - headroom;
+  const scaleMax = maxVal + headroom;
+  const scaleRange = scaleMax - scaleMin;
+  const chartW = 700;
+  const chartH = height;
+  const padX = 8;
+  const padTop = 16;
+  const padBottom = 16;
+  const plotW = chartW - padX * 2;
+  const plotH = chartH - padTop - padBottom;
+  const barGap = 4;
+  const barW = Math.max(5, plotW / points.length - barGap);
+  const yPos = (v) => padTop + plotH - ((v - scaleMin) / scaleRange) * plotH;
+  const zeroY = yPos(0);
+
+  const bars = points
+    .map((p, i) => {
+      const x = padX + i * (barW + barGap);
+      const v = p.value ?? 0;
+      const vY = yPos(v);
+      const isNeg = v < 0;
+      const barTop = isNeg ? zeroY : vY;
+      const barBottom = isNeg ? vY : zeroY;
+      const barH = Math.max(barBottom - barTop, 1);
+      const cls = p.colorClass || 'neutral';
+      const styleAttr = p.color ? ` style="fill:${p.color};"` : '';
+      const labelY = isNeg ? barBottom + 13 : barTop - 5;
+      const labelText = p.label != null ? p.label : v;
+      return `<g class="prop-bar-group" data-idx="${i}">
+        <rect class="prop-bar-hit-area" x="${x - barGap / 2}" y="${padTop}" width="${barW + barGap}" height="${plotH}" fill="transparent"/>
+        <rect class="prop-bar ${cls}" x="${x}" y="${barTop}" width="${barW}" height="${barH}" rx="3"${styleAttr}/>
+        <text class="prop-bar-value ${cls}" x="${x + barW / 2}" y="${labelY}" text-anchor="middle">${labelText}</text>
+      </g>`;
+    })
+    .join('');
+
+  const zeroLine = minVal < 0
+    ? `<line class="prop-zero-marker" x1="${padX}" x2="${chartW - padX}" y1="${zeroY}" y2="${zeroY}"/>`
+    : '';
+  const dashedLine = referenceLine != null
+    ? `<line class="prop-line-marker" x1="${padX}" x2="${chartW - padX}" y1="${yPos(referenceLine)}" y2="${yPos(referenceLine)}"/>`
+    : '';
+
+  return `<svg class="prop-chart-svg" viewBox="0 0 ${chartW} ${chartH}" preserveAspectRatio="none">${zeroLine}${dashedLine}${bars}</svg>`;
+}
+
+// Wires up hover/move/leave listeners on each bar once buildBarChartSvg's
+// markup is actually in the DOM. `points` must be the exact same array
+// (same order) passed to buildBarChartSvg for this container, since bars
+// are matched back to points purely by index.
+function bindBarChartTooltip(container, points) {
+  const svg = container.querySelector('.prop-chart-svg');
+  const tooltip = container.querySelector('.prop-chart-tooltip');
+  const wrap = container.querySelector('.prop-chart-wrap');
+  if (!svg || !tooltip || !wrap) return;
+
+  svg.querySelectorAll('.prop-bar-group').forEach((group) => {
+    const p = points[Number(group.dataset.idx)];
+    if (!p) return;
+    const show = (evt) => {
+      const rect = wrap.getBoundingClientRect();
+      const x = evt.clientX - rect.left;
+      const y = evt.clientY - rect.top;
+      tooltip.innerHTML = p.tooltipHtml || '';
+      tooltip.hidden = false;
+      tooltip.style.left = `${Math.min(Math.max(x, 64), rect.width - 64)}px`;
+      tooltip.style.top = `${Math.max(y - 14, 8)}px`;
+    };
+    const hide = () => { tooltip.hidden = true; };
+    group.addEventListener('mouseenter', show);
+    group.addEventListener('mousemove', show);
+    group.addEventListener('mouseleave', hide);
+  });
+}
+
 const PROP_CHART_WINDOW = 20;
+
+// Builds the ordered {value, colorClass, tooltipHtml} points for the
+// Markets tab's player-prop chart -- shared between propChartBlock (which
+// draws the SVG) and bindPropChartTooltip (which wires up hover), so those
+// two never drift out of sync.
+function buildPropChartPoints(item, games) {
+  const windowGames = games.slice(0, PROP_CHART_WINDOW);
+  const chartGames = [...windowGames].reverse();
+  return chartGames.map((g) => {
+    const hit = isHit(item, g.statValue);
+    const cls = hit == null ? 'neutral' : hit ? 'hit' : 'miss';
+    const scoreLine = g.ownScore != null && g.opponentScore != null
+      ? `<div class="prop-tooltip-score">${teamBadge(g.ownAbbrev, g.ownColor)} ${g.ownName || 'Own'} ${g.ownScore} : ${g.opponentScore} ${g.opponentName || 'Opp'} ${teamBadge(g.opponentAbbrev, g.opponentColor)}</div>`
+      : `<div class="prop-tooltip-score">${teamBadge(g.opponentAbbrev, g.opponentColor)} vs ${g.opponentName || 'Opponent'}</div>`;
+    return {
+      value: g.statValue ?? 0,
+      colorClass: cls,
+      tooltipHtml: `
+        <div class="prop-tooltip-date">${formatShortDate(g.date)}</div>
+        ${scoreLine}
+        <div class="prop-tooltip-stat"><span>${item.statLabel || 'Value'}</span><strong>${g.statValue}</strong></div>
+      `,
+    };
+  });
+}
 
 // Per-game bar chart -- each bar is one game's stat value, colored by
 // isHit (same hit/miss logic the old dot-based view used), with a dashed
@@ -718,9 +840,6 @@ const PROP_CHART_WINDOW = 20;
 function propChartBlock(item, games, h2h, coverage) {
   const quickStatsHtml = propChartQuickStats(item, games, h2h);
   const windowGames = games.slice(0, PROP_CHART_WINDOW);
-  // build_game_log returns newest-first; a trend chart reads naturally
-  // left-to-right as oldest-to-newest, so reverse just for display.
-  const chartGames = [...windowGames].reverse();
   const hits = windowGames.filter((g) => isHit(item, g.statValue)).length;
   const hitPct = windowGames.length ? Math.round((hits / windowGames.length) * 100) : 0;
   const values = windowGames.map((g) => g.statValue).filter((v) => v != null);
@@ -741,83 +860,22 @@ function propChartBlock(item, games, h2h, coverage) {
       <div class="prop-quickstat-grid">${quickStatsHtml}</div>
     </div>`;
 
-  if (!chartGames.length) {
+  const points = buildPropChartPoints(item, games);
+  if (!points.length) {
     return `${headerHtml}<p class="form-note">No recent games found.</p><p class="form-note">${coverageNote(coverage, games.length, item)}</p>`;
   }
 
   const line = item.line != null ? Number(item.line) : null;
-  // Against-the-spread margins (and a few other stats) can be negative, so
-  // this can't just scale 0-to-max like a plain counting stat -- bars need
-  // a real zero baseline they can grow either direction from. Including 0
-  // itself in the min/max means an all-positive or all-negative game log
-  // still gets a visible baseline at the right spot, not just at whichever
-  // edge happens to be smallest/largest. A little headroom (12% of the
-  // range) on both ends keeps value labels from being clipped at the very
-  // top or bottom of the plot.
-  const rawValues = chartGames.map((g) => g.statValue ?? 0);
-  const allValues = line != null ? [...rawValues, line, 0] : [...rawValues, 0];
-  const minVal = Math.min(...allValues);
-  const maxVal = Math.max(...allValues);
-  const valueRange = maxVal - minVal || 1;
-  const headroom = valueRange * 0.12;
-  const scaleMin = minVal - headroom;
-  const scaleMax = maxVal + headroom;
-  const scaleRange = scaleMax - scaleMin;
-  const chartW = 700;
-  const chartH = 220;
-  const padX = 8;
-  const padTop = 16;
-  const padBottom = 16;
-  const plotW = chartW - padX * 2;
-  const plotH = chartH - padTop - padBottom;
-  const barGap = 4;
-  const barW = Math.max(5, plotW / chartGames.length - barGap);
-  const yPos = (v) => padTop + plotH - ((v - scaleMin) / scaleRange) * plotH;
-  const zeroY = yPos(0);
-
-  const bars = chartGames
-    .map((g, i) => {
-      const x = padX + i * (barW + barGap);
-      const v = g.statValue ?? 0;
-      const vY = yPos(v);
-      const isNeg = v < 0;
-      // Bars grow from the zero baseline toward their value in either
-      // direction, rather than always downward from the plot's top edge.
-      const barTop = isNeg ? zeroY : vY;
-      const barBottom = isNeg ? vY : zeroY;
-      const barH = Math.max(barBottom - barTop, 1);
-      const hit = isHit(item, g.statValue);
-      const cls = hit == null ? 'neutral' : hit ? 'hit' : 'miss';
-      // Label sits above the bar for a positive value, below it for a
-      // negative one, so it's never rendered inside/past the bar itself.
-      const labelY = isNeg ? barBottom + 13 : barTop - 5;
-      return `<g class="prop-bar-group" data-idx="${i}">
-        <rect class="prop-bar-hit-area" x="${x - barGap / 2}" y="${padTop}" width="${barW + barGap}" height="${plotH}" fill="transparent"/>
-        <rect class="prop-bar ${cls}" x="${x}" y="${barTop}" width="${barW}" height="${barH}" rx="3"/>
-        <text class="prop-bar-value ${cls}" x="${x + barW / 2}" y="${labelY}" text-anchor="middle">${v}</text>
-      </g>`;
-    })
-    .join('');
-
-  const zeroLine = minVal < 0
-    ? `<line class="prop-zero-marker" x1="${padX}" x2="${chartW - padX}" y1="${zeroY}" y2="${zeroY}"/>`
-    : '';
-  const dashedLine = line != null
-    ? `<line class="prop-line-marker" x1="${padX}" x2="${chartW - padX}" y1="${yPos(line)}" y2="${yPos(line)}"/>`
-    : '';
-
-  const firstDate = formatShortDate(chartGames[0].date);
-  const lastDate = formatShortDate(chartGames[chartGames.length - 1].date);
+  const svgHtml = buildBarChartSvg(points, { referenceLine: line });
+  const orderedGames = [...windowGames].reverse();
+  const firstDate = formatShortDate(orderedGames[0].date);
+  const lastDate = formatShortDate(orderedGames[orderedGames.length - 1].date);
 
   return `
     ${headerHtml}
     <div class="prop-chart-avgmed">Average: <strong>${avg != null ? avg.toFixed(2) : '—'}</strong> &nbsp; Median: <strong>${median != null ? median : '—'}</strong></div>
     <div class="prop-chart-wrap">
-      <svg class="prop-chart-svg" viewBox="0 0 ${chartW} ${chartH}" preserveAspectRatio="none">
-        ${zeroLine}
-        ${dashedLine}
-        ${bars}
-      </svg>
+      ${svgHtml}
       <div class="prop-chart-xaxis"><span>${firstDate}</span><span>${lastDate}</span></div>
       <div class="prop-chart-tooltip" hidden></div>
     </div>
@@ -826,40 +884,13 @@ function propChartBlock(item, games, h2h, coverage) {
   `;
 }
 
-// Wires up hover/move/leave listeners on each bar once propChartBlock's
-// HTML is actually in the DOM -- has to happen after innerHTML assignment
-// since a plain HTML string can't carry live JS event listeners.
+// Wires up hover for propChartBlock's chart once its HTML is actually in
+// the DOM -- recomputes the same points array (buildPropChartPoints is
+// deterministic given the same item/games) rather than threading it
+// through as a separate parameter, so this and propChartBlock can never
+// draw from two different orderings.
 function bindPropChartTooltip(container, item, games) {
-  const svg = container.querySelector('.prop-chart-svg');
-  const tooltip = container.querySelector('.prop-chart-tooltip');
-  const wrap = container.querySelector('.prop-chart-wrap');
-  if (!svg || !tooltip || !wrap) return;
-  const chartGames = [...games.slice(0, PROP_CHART_WINDOW)].reverse();
-
-  svg.querySelectorAll('.prop-bar-group').forEach((group) => {
-    const g = chartGames[Number(group.dataset.idx)];
-    if (!g) return;
-    const show = (evt) => {
-      const rect = wrap.getBoundingClientRect();
-      const x = evt.clientX - rect.left;
-      const y = evt.clientY - rect.top;
-      const scoreLine = g.ownScore != null && g.opponentScore != null
-        ? `<div class="prop-tooltip-score">${teamBadge(g.ownAbbrev, g.ownColor)} ${g.ownName || 'Own'} ${g.ownScore} : ${g.opponentScore} ${g.opponentName || 'Opp'} ${teamBadge(g.opponentAbbrev, g.opponentColor)}</div>`
-        : `<div class="prop-tooltip-score">${teamBadge(g.opponentAbbrev, g.opponentColor)} vs ${g.opponentName || 'Opponent'}</div>`;
-      tooltip.innerHTML = `
-        <div class="prop-tooltip-date">${formatShortDate(g.date)}</div>
-        ${scoreLine}
-        <div class="prop-tooltip-stat"><span>${item.statLabel || 'Value'}</span><strong>${g.statValue}</strong></div>
-      `;
-      tooltip.hidden = false;
-      tooltip.style.left = `${Math.min(Math.max(x, 64), rect.width - 64)}px`;
-      tooltip.style.top = `${Math.max(y - 14, 8)}px`;
-    };
-    const hide = () => { tooltip.hidden = true; };
-    group.addEventListener('mouseenter', show);
-    group.addEventListener('mousemove', show);
-    group.addEventListener('mouseleave', hide);
-  });
+  bindBarChartTooltip(container, buildPropChartPoints(item, games));
 }
 
 async function renderRecentForm(item) {
@@ -1143,6 +1174,32 @@ function mlbGameLogTable(games, highlightFields, cap) {
   return `<div class="mlb-table-wrap"><table class="mlb-table"><thead>${headerRow}</thead><tbody>${bodyRows}</tbody></table></div>`;
 }
 
+// Chart points for the MLB player modal's Last 5/10/20 views -- one point
+// per game, valued by whichever stat tab is currently selected (H+R+RBI
+// computed on the fly like everywhere else that stat's used). No betting
+// line exists in this context (unlike the Markets tab's props), so bars
+// share one neutral color rather than a hit/miss split -- consistent with
+// the same accent-colored, un-graded style the MLB modal's tables already
+// use (see .mlb-col-highlight) rather than borrowing green/red semantics
+// that wouldn't mean anything here.
+function mlbGameLogChartPoints(games, cap, highlightFields) {
+  const slice = games.slice(0, cap);
+  const ordered = [...slice].reverse(); // most-recent-first -> oldest-to-newest for the chart
+  const label = highlightFields.length > 1 ? 'H+R+RBI' : (MLB_STAT_TABS.find((t) => t.fields === highlightFields) || {}).label || highlightFields[0];
+  return ordered.map((g) => {
+    const value = highlightFields.length > 1 ? mlbHri(g) : g[highlightFields[0]] ?? 0;
+    return {
+      value,
+      colorClass: 'neutral',
+      tooltipHtml: `
+        <div class="prop-tooltip-date">${g.date || ''}</div>
+        <div class="prop-tooltip-score">vs ${g.opponent || 'Opponent'}</div>
+        <div class="prop-tooltip-stat"><span>${label}</span><strong>${value}</strong></div>
+      `,
+    };
+  });
+}
+
 const MLB_VIEW_TAB_IDS = ['h2h', 'h2hPitcher', 'last5', 'last10', 'last20', 'season0', 'season1'];
 
 async function openMlbPlayerModal(batter, pitcherId, opponentTeamID) {
@@ -1189,6 +1246,7 @@ function renderMlbPlayerModal() {
     .join('');
 
   let contentHtml;
+  let mlbModalChartPoints = null;
   if (m.loading) {
     contentHtml = loadingOverlay('Loading splits…');
   } else if (m.error) {
@@ -1219,7 +1277,11 @@ function renderMlbPlayerModal() {
       : '<p class="form-note">No career at-bats found against this pitcher (or a probable pitcher hasn\'t been announced yet).</p>';
   } else if (m.viewTab === 'last5' || m.viewTab === 'last10' || m.viewTab === 'last20') {
     const cap = { last5: 5, last10: 10, last20: 20 }[m.viewTab];
-    contentHtml = mlbGameLogTable(m.splits.games, highlightFields, cap);
+    const points = mlbGameLogChartPoints(m.splits.games || [], cap, highlightFields);
+    mlbModalChartPoints = points;
+    contentHtml = points.length
+      ? `<div class="prop-chart-wrap">${buildBarChartSvg(points, { height: 160 })}<div class="prop-chart-tooltip" hidden></div></div>${mlbGameLogTable(m.splits.games, highlightFields, cap)}`
+      : '<p class="form-note">No games in this window.</p>';
   } else {
     const idx = m.viewTab === 'season0' ? 0 : 1;
     const season = seasons[idx];
@@ -1237,6 +1299,7 @@ function renderMlbPlayerModal() {
     <div class="mlb-tab-group mlb-view-tab-group">${viewTabsHtml}</div>
     <div class="mlb-modal-body">${contentHtml}</div>
   `;
+  if (mlbModalChartPoints) bindBarChartTooltip(el.modalContent, mlbModalChartPoints);
   document.getElementById('modal-close').addEventListener('click', closeModal);
   el.modalContent.querySelectorAll('[data-stat-tab]').forEach((btn) => {
     btn.addEventListener('click', () => {
@@ -1392,13 +1455,43 @@ function kboGameRow(g) {
   </tr>`;
 }
 
+// Chart points for one batter's Last 5/10/20 game log -- bars are the same
+// H+R+RBI total kboGameColor already bands into 4 tiers for the table rows,
+// so the chart's bar colors use those exact same real hex values (inline
+// `color`, not a fixed hit/miss palette) rather than introducing a second,
+// inconsistent color language for the same underlying number.
+function kboGameChartPoints(games) {
+  const ordered = [...games].reverse(); // recent_window() returns most-recent-first -> oldest-to-newest for the chart
+  return ordered.map((g) => {
+    const total = g.h + g.r + g.rbi;
+    return {
+      value: total,
+      color: kboGameColor(g),
+      tooltipHtml: `
+        <div class="prop-tooltip-date">${g.date || '—'}</div>
+        <div class="prop-tooltip-score">vs ${g.opp}</div>
+        <div class="prop-tooltip-stat"><span>AB / H / R / RBI / HR</span><strong>${g.ab}/${g.h}/${g.r}/${g.rbi}/${g.hr}</strong></div>
+      `,
+    };
+  });
+}
+
+// batter.id -> chart points, populated while building the HTML string
+// (kboBatterGameLogBlock) and read back after innerHTML assignment
+// (renderKboMatchup) to wire up hover -- same pattern as mlbBatterContext,
+// needed because a plain HTML string can't carry live event listeners.
+const kboChartPointsByBatter = new Map();
+
 function kboBatterGameLogBlock(b) {
   const s = b.stats[state.kboView];
   if (!s || !s.games.length) {
     return `<div class="kbo-batter-gamelog"><h4>${b.fullName}</h4><p class="mlb-subtitle">No games in this window.</p></div>`;
   }
-  return `<div class="kbo-batter-gamelog">
+  const points = kboGameChartPoints(s.games);
+  kboChartPointsByBatter.set(String(b.id), points);
+  return `<div class="kbo-batter-gamelog" data-kbo-chart="${b.id}">
     <h4>${b.fullName}</h4>
+    <div class="prop-chart-wrap">${buildBarChartSvg(points, { height: 140 })}<div class="prop-chart-tooltip" hidden></div></div>
     <div class="mlb-table-wrap">
       <table class="mlb-table">
         <thead><tr><th>Date</th><th>Opp</th><th>AB</th><th>H</th><th>R</th><th>RBI</th><th>HR</th></tr></thead>
@@ -1433,9 +1526,14 @@ function renderKboMatchup() {
   // be an abbreviation (e.g. "TIG") -- see _resolve_kbo_team in server.py.
   const awayLabel = data.awayTeamName || game.awayName;
   const homeLabel = data.homeTeamName || game.homeName;
+  kboChartPointsByBatter.clear();
   el.kboMatchupContent.innerHTML =
     kboTeamCard(`${awayLabel} batters vs. ${homeLabel}`, data.awayBattersVsHome) +
     kboTeamCard(`${homeLabel} batters vs. ${awayLabel}`, data.homeBattersVsAway);
+  el.kboMatchupContent.querySelectorAll('[data-kbo-chart]').forEach((wrap) => {
+    const points = kboChartPointsByBatter.get(wrap.dataset.kboChart);
+    if (points) bindBarChartTooltip(wrap, points);
+  });
 }
 
 async function loadKboMatchup() {
