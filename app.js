@@ -47,7 +47,6 @@ const state = {
   hitRateWindow: 'l5',
   hitRateFrom: 0,
   hitRateTo: 100,
-  hitRateStarted: false, // true once the user explicitly clicks "Load Hit Rates" -- opening the panel no longer eagerly fetches on its own
   hitRateLoading: false,
   hitRateLoadedCount: 0,
   hitRateTotalCount: 0,
@@ -803,32 +802,6 @@ function hitRateHistogramBuckets(rates) {
 function renderHitRatePanel() {
   const itemsInScope = getFilteredItems({ ignoreHitRate: true }).filter((i) => i.statID);
 
-  // Nothing fetches until the user explicitly asks for it -- opening the
-  // panel used to eagerly fetch every prop in the current view immediately,
-  // which was fine for a small league but meant a real "Loading hit
-  // rates... 380 / 5240" situation on a big one like MLB with no market-
-  // type/stat filter narrowing it down first. Showing the count up front
-  // and waiting for a click means the person can narrow scope with the
-  // existing Market Type/Stat filters first if they want, rather than the
-  // panel silently launching a few thousand requests the moment it opens.
-  if (!state.hitRateStarted) {
-    const big = itemsInScope.length > 500;
-    el.modalContent.innerHTML = `
-      <button class="modal-close" id="modal-close">&times;</button>
-      <h2>Hit Rate Filter</h2>
-      <p class="form-note">Filters player props by hit rate over a chosen window — covers every batter and pitcher stat (Hits, Home Runs, RBI, Strikeouts, Walks Allowed, Total Bases, and more), since it's built from the same game-log data every prop already uses.</p>
-      <p class="form-note">This will fetch game-log data for all <strong>${itemsInScope.length}</strong> props currently shown.${big ? ' That\'s a lot — narrow it down with the Market Type or Stat filters first if you only care about a subset, or it may take a while given the API\'s rate limit.' : ''}</p>
-      <div class="modal-actions">
-        <button class="btn-secondary" id="hr-cancel">Cancel</button>
-        <button class="btn-primary" id="hr-load">Load Hit Rates for ${itemsInScope.length} Props</button>
-      </div>
-    `;
-    document.getElementById('modal-close').addEventListener('click', closeModal);
-    document.getElementById('hr-cancel').addEventListener('click', closeModal);
-    document.getElementById('hr-load').addEventListener('click', () => startHitRateLoad());
-    return;
-  }
-
   const rates = itemsInScope
     .map((i) => {
       const cached = miniFormCache.get(i.id);
@@ -908,9 +881,9 @@ function renderHitRatePanel() {
   });
 }
 
-async function startHitRateLoad() {
+async function openHitRatePanel() {
+  el.modalBackdrop.hidden = false;
   const itemsInScope = getFilteredItems({ ignoreHitRate: true }).filter((i) => i.statID);
-  state.hitRateStarted = true;
   state.hitRateLoading = true;
   state.hitRateLoadedCount = 0;
   state.hitRateTotalCount = itemsInScope.length;
@@ -921,15 +894,6 @@ async function startHitRateLoad() {
     renderHitRatePanel();
   });
   state.hitRateLoading = false;
-  renderHitRatePanel();
-}
-
-function openHitRatePanel() {
-  el.modalBackdrop.hidden = false;
-  state.hitRateStarted = false;
-  state.hitRateLoading = false;
-  state.hitRateLoadedCount = 0;
-  state.hitRateTotalCount = 0;
   renderHitRatePanel();
 }
 
