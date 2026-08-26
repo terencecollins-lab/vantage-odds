@@ -737,7 +737,19 @@ body {
   box-shadow: var(--shadow);
 }
 .prop-tooltip-date { font-weight: 700; margin-bottom: 3px; }
-.prop-tooltip-score { opacity: 0.85; margin-bottom: 4px; }
+.prop-tooltip-score { opacity: 0.85; margin-bottom: 4px; display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+.team-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  font-size: 8.5px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  flex-shrink: 0;
+}
 .prop-tooltip-stat { display: flex; justify-content: space-between; gap: 10px; }
 .prop-tooltip-stat strong { font-family: 'JetBrains Mono', monospace; }
 

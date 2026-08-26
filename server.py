@@ -424,6 +424,33 @@ def team_short_name(team_obj):
     return names.get("medium") or names.get("short") or names.get("long") or "Unknown"
 
 
+def team_abbrev(team_obj):
+    """Short 2-4 letter code for a colored-initials badge (e.g. 'LAL',
+    'TEX') -- prefers the API's own 'short' name field, falling back to the
+    first 3 letters of whatever longer name is available for a league/team
+    where 'short' isn't populated."""
+    if not team_obj:
+        return None
+    names = team_obj.get("names") or {}
+    short = names.get("short")
+    if short:
+        return short
+    fallback = names.get("medium") or names.get("long")
+    return fallback[:3].upper() if fallback else None
+
+
+def team_color(team_obj):
+    """Team's real primary brand color (hex, e.g. '#552583' for the
+    Lakers), when SportsGameOdds provides one -- confirmed present on
+    /teams responses; not yet confirmed whether every league's *event*-
+    embedded team object also carries it, so callers must treat a missing
+    color as normal, not an error. Powers the initials badge's background
+    so it's the team's own color rather than a generic placeholder."""
+    if not team_obj:
+        return None
+    return (team_obj.get("colors") or {}).get("primary")
+
+
 GAME_STARTED_CUTOFF_MINUTES = 60
 # MLB/KBO Matchups' own game pickers still want an already-started game to
 # stay pickable (e.g. to check history mid-game) rather than disappearing
@@ -692,7 +719,11 @@ def build_game_log(events, player_id, stat_id, team_id, opponent_team_id):
             "home": is_home,
             "opponentTeamID": (opp_team or {}).get("teamID"),
             "opponentName": team_short_name(opp_team),
+            "opponentAbbrev": team_abbrev(opp_team),
+            "opponentColor": team_color(opp_team),
             "ownName": team_short_name(own_team),
+            "ownAbbrev": team_abbrev(own_team),
+            "ownColor": team_color(own_team),
             "ownScore": own_score,
             "opponentScore": opponent_score,
             "statValue": stat_value,

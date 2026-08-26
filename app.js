@@ -653,6 +653,18 @@ function playerFormBlock(label, games, h2h, coverage, hitTestItem, displayItem) 
     </div>`;
 }
 
+// Small colored-initials badge standing in for a team logo -- SportsGameOdds
+// doesn't provide logo images at all (confirmed against their public API
+// docs: a team object only has names + a primary/secondary brand color),
+// so this uses that real color as the badge background with the team's own
+// abbreviation on top, rather than a generic gray placeholder circle.
+function teamBadge(abbrev, color) {
+  if (!abbrev) return '';
+  const bg = color || 'var(--border)';
+  const fg = color ? '#ffffff' : 'var(--text-muted)';
+  return `<span class="team-badge" style="background:${bg};color:${fg};">${abbrev.slice(0, 3)}</span>`;
+}
+
 function formatShortDate(iso) {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return '';
@@ -832,8 +844,8 @@ function bindPropChartTooltip(container, item, games) {
       const x = evt.clientX - rect.left;
       const y = evt.clientY - rect.top;
       const scoreLine = g.ownScore != null && g.opponentScore != null
-        ? `<div class="prop-tooltip-score">${g.ownName || 'Own'} ${g.ownScore} : ${g.opponentScore} ${g.opponentName || 'Opp'}</div>`
-        : `<div class="prop-tooltip-score">vs ${g.opponentName || 'Opponent'}</div>`;
+        ? `<div class="prop-tooltip-score">${teamBadge(g.ownAbbrev, g.ownColor)} ${g.ownName || 'Own'} ${g.ownScore} : ${g.opponentScore} ${g.opponentName || 'Opp'} ${teamBadge(g.opponentAbbrev, g.opponentColor)}</div>`
+        : `<div class="prop-tooltip-score">${teamBadge(g.opponentAbbrev, g.opponentColor)} vs ${g.opponentName || 'Opponent'}</div>`;
       tooltip.innerHTML = `
         <div class="prop-tooltip-date">${formatShortDate(g.date)}</div>
         ${scoreLine}
