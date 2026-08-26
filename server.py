@@ -4,6 +4,7 @@
 lives only here, never reaching the browser or any client app.
 """
 
+import collections
 import concurrent.futures
 import datetime
 import hashlib
@@ -68,9 +69,26 @@ MLB_TEAM_STATSAPI_ID = {
     "WASHINGTON_NATIONALS_MLB": 120,
 }
 
-_cache = {}  # cache namespace + query string -> (expires_at, parsed_json)
+_cache = collections.OrderedDict()  # cache namespace + query string -> (expires_at, parsed_json)
 _cache_writes_since_sweep = 0
 _CACHE_SWEEP_EVERY = 25
+_CACHE_MAX_ENTRIES = 600
+# The TTL sweep in _cache_set only removes an entry once it's already past
+# its own expiry -- with some TTLs as long as 24-30h (game logs, KBO
+# rosters/player pages), a single long session that touches many distinct
+# league/team/player/date-window combinations can accumulate a large
+# number of live, not-yet-expired entries well before any of them age out.
+# Some of those payloads are large too -- a single windowed MLB game-log
+# fetch can carry thousands of raw event dicts. This hard cap bounds
+# worst-case memory regardless of TTL: a real OOM kill was observed in
+# production (systemd log: 'Main process exited, code=killed,
+# status=9/KILL', repeating every restart cycle) consistent with unbounded
+# growth over time rather than a single request spiking usage. Once _cache
+# would exceed this, the oldest-inserted entries are evicted first (FIFO --
+# see _cache_set) on the theory that whatever's been sitting longest is
+# least likely to be needed again soon. This is a rough proxy for memory
+# (entry count, not bytes), not an exact budget -- tune based on real
+# `free -h` / RSS numbers once observed.
 
 
 def _cache_set(key, ttl, value):
@@ -81,8 +99,14 @@ def _cache_set(key, ttl, value):
     # key came up again. Over a long-running process that grows without
     # bound. A cheap periodic sweep of anything already past its own TTL
     # keeps steady-state memory bounded to "what's still live" instead of
-    # "everything ever computed".
+    # "everything ever computed" -- and the hard cap below (_CACHE_MAX_ENTRIES)
+    # backstops that with a bound that doesn't depend on TTLs actually expiring.
     global _cache_writes_since_sweep
+    # Pop before re-inserting so a re-written key always moves to the end --
+    # otherwise a plain dict would leave it in its original insertion
+    # position, and "oldest inserted" (used for FIFO eviction below) would
+    # stop meaning "least recently touched" for any key that gets refreshed.
+    _cache.pop(key, None)
     _cache[key] = (time.time() + ttl, value)
     _cache_writes_since_sweep += 1
     if _cache_writes_since_sweep >= _CACHE_SWEEP_EVERY:
@@ -90,6 +114,8 @@ def _cache_set(key, ttl, value):
         now = time.time()
         for k in [k for k, (expires_at, _) in _cache.items() if expires_at <= now]:
             del _cache[k]
+    while len(_cache) > _CACHE_MAX_ENTRIES:
+        _cache.popitem(last=False)
 
 
 def load_env_file(path=None):
@@ -232,13 +258,29 @@ def fetch_all_events(params, cache_ns, ttl, max_pages=GAME_LOG_MAX_PAGES):
     return all_events
 
 
-def fetch_all_events_windowed(params, cache_ns, ttl, earliest_iso, window_days=30, max_workers=20):
+def fetch_all_events_windowed(params, cache_ns, ttl, earliest_iso, window_days=30, max_workers=6):
     """Team-scoped variant of fetch_all_events that fans out across date
     windows in parallel instead of walking the cursor sequentially one page
     at a time. Cursor pagination can't be parallelized (each page's cursor
     depends on the previous response), but independent date ranges can --
     for a high-volume league (MLB especially) walking 10+ pages one at a
-    time was slow enough to occasionally get cut off before finishing."""
+    time was slow enough to occasionally get cut off before finishing.
+
+    max_workers is deliberately modest (was 20 briefly, dropped after a
+    real incident): this fan-out happens PER incoming /api/game-log
+    request, and the client already runs up to MINI_FORM_CONCURRENCY (4) of
+    those concurrently for a page full of prop cards. Right after a service
+    restart -- which wipes this entire in-memory cache, including every
+    previously-warm game-log entry -- that's up to 4 * max_workers
+    concurrent outbound connections from a single small VM, all cold, all
+    at once. At 20 workers that was 80 concurrent connections during
+    exactly the moment the process was most fragile (just after
+    restarting), and requests were observed getting cut off mid-response as
+    a result (client-side 'Unexpected end of JSON input' on most/all prop
+    cards simultaneously). 6 keeps most of the parallel speedup over a
+    fully sequential walk while capping the worst case at a much more
+    survivable ~24 concurrent connections.
+    """
     query = urllib.parse.urlencode(params)
     cache_key = f"{cache_ns}:windowed:{query}"
     cached = _cache.get(cache_key)
@@ -2024,6 +2066,30 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+class BoundedThreadingHTTPServer(ThreadingHTTPServer):
+    """Plain ThreadingHTTPServer spawns one new OS thread per incoming
+    connection with no ceiling at all -- fine under light load, but combined
+    with fetch_all_events_windowed's own internal thread pool (see above),
+    a burst of cold-cache /api/game-log requests (e.g. right after a service
+    restart wipes the cache, and a page full of prop cards all start
+    fetching their mini-form at once) could compound into far more
+    concurrent threads than this small VM can comfortably hold, worsening
+    exactly the kind of connection-reset/truncated-response failures this
+    is meant to prevent. daemon_threads=True (already ThreadingHTTPServer's
+    default) means these still don't block process shutdown; this only
+    adds an upper bound on how many can run at once, queuing the rest
+    briefly via the semaphore rather than spawning unboundedly.
+    """
+    _connection_semaphore = threading.Semaphore(64)
+
+    def process_request(self, request, client_address):
+        self._connection_semaphore.acquire()
+        try:
+            super().process_request(request, client_address)
+        finally:
+            self._connection_semaphore.release()
+
+
 if __name__ == "__main__":
     if not API_KEY:
         print("[vantage] WARNING: SPORTSGAMEODDS_API_KEY not found in environment or .env file.")
@@ -2031,6 +2097,6 @@ if __name__ == "__main__":
         threading.Thread(target=refresh_best_no_vig_loop, daemon=True).start()
     threading.Thread(target=refresh_golf_loop, daemon=True).start()
     threading.Thread(target=refresh_kbo_prewarm_loop, daemon=True).start()
-    server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+    server = BoundedThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print(f"[vantage] Serving on http://localhost:{PORT}")
     server.serve_forever()
