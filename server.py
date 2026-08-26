@@ -193,7 +193,42 @@ class UpstreamError(Exception):
         self.message = message
 
 
+_sgo_rate_lock = threading.Lock()
+_sgo_request_times = collections.deque()
+SGO_RATE_LIMIT_PER_MINUTE = 8
+# SportsGameOdds' free "Amateur" tier allows 10 requests/minute -- 8 leaves
+# a safety margin for clock jitter and whatever's already in flight when a
+# new request arrives. This became load-bearing (not just theoretical) once
+# the Hit Rate filter started eagerly fetching game logs for every item in
+# the grid up front, rather than only ever fetching what's on-screen the
+# way mini-form/Recent Form already did -- that's a much bigger burst of
+# requests than this app previously generated, and a real "Rate limit
+# exceeded" was already observed in production from the *existing* request
+# volume (mainly the Best No-Vig background loop) even before this. Every
+# call to _get_json (the SportsGameOdds-specific fetcher) blocks here until
+# there's room in the trailing 60-second window, turning what would
+# otherwise be a hard 429 failure into a short, invisible wait instead.
+# Deliberately NOT applied to _fetch_mlb_json (MLB's own free Stats API),
+# _fetch_mykbo_html (mykbostats.com, which has its own separate throttling
+# already), or _fetch_espn_json (ESPN's public endpoints) -- those are
+# unrelated services with their own limits, not SportsGameOdds' budget.
+
+
+def _sgo_rate_limit_wait():
+    while True:
+        with _sgo_rate_lock:
+            now = time.time()
+            while _sgo_request_times and now - _sgo_request_times[0] > 60:
+                _sgo_request_times.popleft()
+            if len(_sgo_request_times) < SGO_RATE_LIMIT_PER_MINUTE:
+                _sgo_request_times.append(now)
+                return
+            sleep_for = 60 - (now - _sgo_request_times[0]) + 0.05
+        time.sleep(max(sleep_for, 0.05))
+
+
 def _get_json(url):
+    _sgo_rate_limit_wait()
     req = urllib.request.Request(
         url,
         headers={
@@ -1776,7 +1811,15 @@ def compute_best_no_vig():
 
 _best_no_vig_lock = threading.Lock()
 _best_no_vig_cache = {"payload": None, "computed_at": 0}
-BEST_NO_VIG_REFRESH_INTERVAL = 25  # slightly above MARKETS_CACHE_TTL
+# 41 leagues at SGO_RATE_LIMIT_PER_MINUTE (8/min) is a little over 5 minutes
+# just for compute_best_no_vig's own sequential per-league fetches, before
+# this loop's own sleep even starts -- was 25s (slightly above
+# MARKETS_CACHE_TTL) back when this fan-out ran essentially unthrottled;
+# left at that pace now, a new cycle would start piling up behind the
+# previous one before it's even finished draining through the rate
+# limiter. 360s (6 min) gives a full cycle room to actually complete with
+# a little slack, rather than cycles perpetually queuing up.
+BEST_NO_VIG_REFRESH_INTERVAL = 360
 
 
 def refresh_best_no_vig_loop():

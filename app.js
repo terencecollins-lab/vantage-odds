@@ -43,6 +43,13 @@ const state = {
   golfLoading: false,
   golfError: null,
   golfTimer: null,
+  hitRateFilter: null, // {window, from, to} once applied via the panel's "Show N Results" button
+  hitRateWindow: 'l5',
+  hitRateFrom: 0,
+  hitRateTo: 100,
+  hitRateLoading: false,
+  hitRateLoadedCount: 0,
+  hitRateTotalCount: 0,
 };
 
 const el = {
@@ -84,6 +91,8 @@ const el = {
   golfTournamentLabel: document.getElementById('golf-tournament-label'),
   golfContent: document.getElementById('golf-content'),
   golfEmpty: document.getElementById('golf-empty'),
+  hitRateFilterBtn: document.getElementById('hit-rate-filter-btn'),
+  hitRateBadge: document.getElementById('hit-rate-badge'),
 };
 
 function starIcon(active) {
@@ -227,13 +236,20 @@ function getAvailableStatTypes() {
   return [...labels].sort();
 }
 
-function getFilteredItems() {
+function getFilteredItems({ ignoreHitRate = false } = {}) {
   let items = state.items.filter((item) => {
     if (state.marketType !== 'All' && item.marketType !== state.marketType) return false;
     if (state.sportsbook !== 'All' && !item.bookmakers.some((b) => b.label === state.sportsbook)) return false;
     if (state.statType !== 'All' && item.statLabel !== state.statType) return false;
     if (state.watchlistOnly && !state.watchlist.has(item.id)) return false;
     if (state.search && !item.name.toLowerCase().includes(state.search.toLowerCase())) return false;
+    if (!ignoreHitRate && state.hitRateFilter) {
+      if (!item.statID) return false;
+      const cached = miniFormCache.get(item.id);
+      if (!cached || cached === 'error') return false;
+      const hr = computeHitRateForWindow(item, cached, state.hitRateFilter.window);
+      if (hr == null || hr < state.hitRateFilter.from || hr > state.hitRateFilter.to) return false;
+    }
     return true;
   });
 
@@ -682,6 +698,186 @@ function groupGamesByYear(games) {
   return [...map.entries()].sort((a, b) => a[0] - b[0]); // oldest season first
 }
 
+// Hit Rate filter -- lets someone filter the whole grid down to props whose
+// recent-form hit rate falls in a chosen range, over a chosen window (Last
+// 5/10/20, all-time H2H, or a specific season). Works for every item with a
+// statID regardless of stat type -- batter props (Hits, HR, RBI, Total
+// Bases, ...) and pitcher props (Strikeouts, Walks Allowed, Earned Runs,
+// ...) alike, since it's built entirely on the same isHit/game-log data
+// every other stat already uses, not a stat-specific list.
+const HIT_RATE_CURRENT_YEAR = new Date().getFullYear();
+const HIT_RATE_WINDOWS = [
+  { id: 'l5', label: 'L5' },
+  { id: 'l10', label: 'L10' },
+  { id: 'l20', label: 'L20' },
+  { id: 'h2h', label: 'H2H' },
+  { id: String(HIT_RATE_CURRENT_YEAR), label: String(HIT_RATE_CURRENT_YEAR) },
+  { id: String(HIT_RATE_CURRENT_YEAR - 1), label: String(HIT_RATE_CURRENT_YEAR - 1) },
+];
+
+function computeHitRateForWindow(item, gamesData, windowId) {
+  const { games, h2h } = gamesData;
+  let subset;
+  if (windowId === 'l5') subset = games.slice(0, 5);
+  else if (windowId === 'l10') subset = games.slice(0, 10);
+  else if (windowId === 'l20') subset = games.slice(0, 20);
+  else if (windowId === 'h2h') subset = h2h;
+  else {
+    const year = Number(windowId);
+    subset = games.filter((g) => new Date(g.date).getFullYear() === year);
+  }
+  if (!subset || !subset.length) return null;
+  const hits = subset.filter((g) => isHit(item, g.statValue)).length;
+  return Math.round((hits / subset.length) * 100);
+}
+
+// Eagerly fetches game logs for every item that doesn't already have one
+// cached -- unlike mini-form/Recent Form, which only ever fetch what's
+// actually visible or opened, the Hit Rate panel needs every candidate
+// item's data up front so the histogram/slider/result-count are accurate
+// immediately rather than only for cards that happen to have scrolled into
+// view. Shares miniFormCache with those other features, so anything
+// already fetched (e.g. from scrolling the grid earlier) doesn't refetch --
+// this is also why the server-side rate limiter (see _sgo_rate_limit_wait
+// in server.py) is essential now: this can realistically request game logs
+// for dozens of items back to back, which the app never did in bulk before.
+const HIT_RATE_FETCH_CONCURRENCY = 5;
+
+async function ensureHitRateDataLoaded(items, onProgress) {
+  const total = items.length;
+  let done = items.filter((i) => miniFormCache.has(i.id)).length;
+  onProgress(done, total);
+  const targets = items.filter((i) => !miniFormCache.has(i.id));
+  if (!targets.length) return;
+  let idx = 0;
+  async function worker() {
+    while (idx < targets.length) {
+      const item = targets[idx++];
+      try {
+        const { games, h2h } = await fetchGameLog({
+          league: item.league,
+          teamID: item.playerTeamID,
+          playerID: item.playerID,
+          statID: item.statID,
+          opponentTeamID: item.opponentTeamID,
+        });
+        miniFormCache.set(item.id, { games, h2h });
+      } catch {
+        miniFormCache.set(item.id, 'error');
+      }
+      done++;
+      onProgress(done, total);
+    }
+  }
+  await Promise.all(Array.from({ length: HIT_RATE_FETCH_CONCURRENCY }, worker));
+}
+
+function hitRateHistogramBuckets(rates) {
+  const buckets = new Array(10).fill(0);
+  rates.forEach((v) => {
+    const idx = Math.min(9, Math.max(0, Math.floor(v / 10)));
+    buckets[idx]++;
+  });
+  return buckets;
+}
+
+function renderHitRatePanel() {
+  const itemsInScope = getFilteredItems({ ignoreHitRate: true }).filter((i) => i.statID);
+  const rates = itemsInScope
+    .map((i) => {
+      const cached = miniFormCache.get(i.id);
+      if (!cached || cached === 'error') return null;
+      return computeHitRateForWindow(i, cached, state.hitRateWindow);
+    })
+    .filter((v) => v != null);
+  const buckets = hitRateHistogramBuckets(rates);
+  const maxBucket = Math.max(...buckets, 1);
+  const matchCount = rates.filter((v) => v >= state.hitRateFrom && v <= state.hitRateTo).length;
+
+  const windowTabsHtml = HIT_RATE_WINDOWS.map(
+    (w) => `<button class="category-chip ${state.hitRateWindow === w.id ? 'active' : ''}" data-hr-window="${w.id}">${w.label}</button>`
+  ).join('');
+
+  const barsHtml = buckets
+    .map((count, i) => {
+      const bucketFrom = i * 10;
+      const bucketTo = i * 10 + 10;
+      const inRange = bucketTo > state.hitRateFrom && bucketFrom < state.hitRateTo;
+      const heightPct = Math.max(Math.round((count / maxBucket) * 100), count > 0 ? 6 : 2);
+      return `<div class="hr-hist-bar ${inRange ? 'in-range' : ''}" style="height:${heightPct}%" title="${bucketFrom}-${bucketTo}%: ${count} item${count === 1 ? '' : 's'}"></div>`;
+    })
+    .join('');
+
+  const progressHtml = state.hitRateLoading
+    ? `<p class="form-note">Loading hit rates… ${state.hitRateLoadedCount} / ${state.hitRateTotalCount}</p>`
+    : '';
+
+  el.modalContent.innerHTML = `
+    <button class="modal-close" id="modal-close">&times;</button>
+    <h2>Hit Rate Filter</h2>
+    <p class="form-note">Filters player props by hit rate over the selected window — covers every batter and pitcher stat (Hits, Home Runs, RBI, Strikeouts, Walks Allowed, Total Bases, and more), since it's built from the same game-log data every prop already uses.</p>
+    <div class="mlb-tab-group">${windowTabsHtml}</div>
+    <div class="hr-range-row">
+      <span>From <strong>${state.hitRateFrom}%</strong></span>
+      <span>To <strong>${state.hitRateTo}%</strong></span>
+    </div>
+    <div class="hr-histogram">${barsHtml}</div>
+    <div class="hr-slider-wrap">
+      <input type="range" id="hr-from" min="0" max="100" step="1" value="${state.hitRateFrom}">
+      <input type="range" id="hr-to" min="0" max="100" step="1" value="${state.hitRateTo}">
+    </div>
+    ${progressHtml}
+    <div class="modal-actions">
+      <button class="btn-secondary" id="hr-clear">Clear filter</button>
+      <button class="btn-primary" id="hr-apply">Show ${matchCount} Results</button>
+    </div>
+  `;
+
+  document.getElementById('modal-close').addEventListener('click', closeModal);
+  el.modalContent.querySelectorAll('[data-hr-window]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      state.hitRateWindow = btn.dataset.hrWindow;
+      renderHitRatePanel();
+    });
+  });
+  const fromInput = document.getElementById('hr-from');
+  const toInput = document.getElementById('hr-to');
+  fromInput.addEventListener('input', () => {
+    state.hitRateFrom = Math.min(Number(fromInput.value), state.hitRateTo);
+    renderHitRatePanel();
+  });
+  toInput.addEventListener('input', () => {
+    state.hitRateTo = Math.max(Number(toInput.value), state.hitRateFrom);
+    renderHitRatePanel();
+  });
+  document.getElementById('hr-clear').addEventListener('click', () => {
+    state.hitRateFilter = null;
+    closeModal();
+    render();
+  });
+  document.getElementById('hr-apply').addEventListener('click', () => {
+    state.hitRateFilter = { window: state.hitRateWindow, from: state.hitRateFrom, to: state.hitRateTo };
+    closeModal();
+    render();
+  });
+}
+
+async function openHitRatePanel() {
+  el.modalBackdrop.hidden = false;
+  const itemsInScope = getFilteredItems({ ignoreHitRate: true }).filter((i) => i.statID);
+  state.hitRateLoading = true;
+  state.hitRateLoadedCount = 0;
+  state.hitRateTotalCount = itemsInScope.length;
+  renderHitRatePanel();
+  await ensureHitRateDataLoaded(itemsInScope, (done, total) => {
+    state.hitRateLoadedCount = done;
+    state.hitRateTotalCount = total;
+    renderHitRatePanel();
+  });
+  state.hitRateLoading = false;
+  renderHitRatePanel();
+}
+
 // Quick-glance hit-rate grid above the chart: L5 / L10 / H2H, plus one
 // entry per calendar year actually present in the game log (so a rookie's
 // single-season history shows one year, a veteran's shows several) --
@@ -952,6 +1148,11 @@ function render() {
   renderGrid();
   el.watchlistCount.textContent = state.watchlist.size;
   el.watchlistToggle.classList.toggle('active', state.watchlistOnly);
+  el.hitRateFilterBtn.classList.toggle('active', !!state.hitRateFilter);
+  el.hitRateBadge.hidden = !state.hitRateFilter;
+  if (state.hitRateFilter) {
+    el.hitRateBadge.textContent = `${state.hitRateFilter.from}-${state.hitRateFilter.to}%`;
+  }
 }
 
 el.search.addEventListener('input', (e) => {
@@ -966,6 +1167,7 @@ el.watchlistToggle.addEventListener('click', () => {
   state.watchlistOnly = !state.watchlistOnly;
   render();
 });
+el.hitRateFilterBtn.addEventListener('click', () => openHitRatePanel());
 el.modalBackdrop.addEventListener('click', (e) => {
   if (e.target === el.modalBackdrop) closeModal();
 });

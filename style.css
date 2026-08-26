@@ -767,6 +767,80 @@ body {
 .btn-primary { background: var(--accent); color: white; border-color: var(--accent); }
 .btn-secondary { background: var(--bg-elevated); color: var(--text); }
 
+.hr-range-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+  color: var(--text-muted);
+  margin: 16px 0 6px;
+}
+.hr-range-row strong { color: var(--text); font-family: 'JetBrains Mono', monospace; }
+.hr-histogram {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 56px;
+  padding: 0 2px;
+}
+.hr-hist-bar {
+  flex: 1;
+  background: var(--border);
+  border-radius: 2px 2px 0 0;
+  min-height: 2px;
+}
+.hr-hist-bar.in-range { background: var(--accent); }
+.hr-slider-wrap {
+  position: relative;
+  height: 28px;
+  margin-top: 2px;
+}
+.hr-slider-wrap input[type="range"] {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 10px;
+  width: 100%;
+  margin: 0;
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  pointer-events: none;
+}
+.hr-slider-wrap input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  background: var(--border);
+  border-radius: 2px;
+}
+.hr-slider-wrap input[type="range"]::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  pointer-events: auto;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--bg-elevated);
+  box-shadow: var(--shadow);
+  margin-top: -6px;
+  cursor: pointer;
+}
+.hr-slider-wrap input[type="range"]::-moz-range-track {
+  height: 4px;
+  background: var(--border);
+  border-radius: 2px;
+}
+.hr-slider-wrap input[type="range"]::-moz-range-thumb {
+  pointer-events: auto;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--bg-elevated);
+  box-shadow: var(--shadow);
+  cursor: pointer;
+}
+#hit-rate-filter-btn.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+
 @media (max-width: 720px) {
   .stats-row { grid-template-columns: repeat(2, 1fr); }
   .app-shell { padding: 16px 16px 40px; }
