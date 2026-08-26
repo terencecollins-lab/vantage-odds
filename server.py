@@ -657,14 +657,21 @@ def build_game_log(events, player_id, stat_id, team_id, opponent_team_id):
         home_id = (teams.get("home") or {}).get("teamID")
         is_home = home_id == team_id
 
+        # Final score, when available -- independent of player_id/stat_id,
+        # since the game's own score lives at the event level regardless of
+        # which player or team stat this particular chart is about. Powers
+        # the chart tooltip's "TEX 5 : 2 LAD"-style line; None on either side
+        # just means the tooltip omits the score rather than failing.
+        home_pts = (game_results.get("home") or {}).get("points")
+        away_pts = (game_results.get("away") or {}).get("points")
+        own_score, opponent_score = (home_pts, away_pts) if is_home else (away_pts, home_pts)
+
         if player_id:
             player_line = game_results.get(player_id)
             if not player_line or stat_id not in player_line:
                 continue
             stat_value = player_line[stat_id]
         elif stat_id in TEAM_STAT_IDS:
-            home_pts = (game_results.get("home") or {}).get("points")
-            away_pts = (game_results.get("away") or {}).get("points")
             if home_pts is None or away_pts is None:
                 continue
             own_pts, opp_pts = (home_pts, away_pts) if is_home else (away_pts, home_pts)
@@ -678,12 +685,16 @@ def build_game_log(events, player_id, stat_id, team_id, opponent_team_id):
             continue
 
         opp_team = teams.get("away") if is_home else teams.get("home")
+        own_team = teams.get("home") if is_home else teams.get("away")
         games.append({
             "eventID": event["eventID"],
             "date": starts_at,
             "home": is_home,
             "opponentTeamID": (opp_team or {}).get("teamID"),
             "opponentName": team_short_name(opp_team),
+            "ownName": team_short_name(own_team),
+            "ownScore": own_score,
+            "opponentScore": opponent_score,
             "statValue": stat_value,
         })
     games.sort(key=lambda g: g["date"] or "", reverse=True)

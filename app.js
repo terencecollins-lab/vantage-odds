@@ -652,6 +652,174 @@ function playerFormBlock(label, games, h2h, coverage, hitTestItem, displayItem) 
     </div>`;
 }
 
+function formatShortDate(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
+function groupGamesByYear(games) {
+  const map = new Map();
+  for (const g of games) {
+    const year = new Date(g.date).getFullYear();
+    if (Number.isNaN(year)) continue;
+    if (!map.has(year)) map.set(year, []);
+    map.get(year).push(g);
+  }
+  return [...map.entries()].sort((a, b) => a[0] - b[0]); // oldest season first
+}
+
+// Quick-glance hit-rate grid above the chart: L5 / L10 / H2H, plus one
+// entry per calendar year actually present in the game log (so a rookie's
+// single-season history shows one year, a veteran's shows several) --
+// computed entirely client-side from dates already in `games`, no extra
+// endpoint needed.
+function propChartQuickStats(item, games, h2h) {
+  const yearGroups = groupGamesByYear(games);
+  const entries = [
+    { label: 'L5', games: games.slice(0, 5) },
+    { label: 'L10', games: games.slice(0, 10) },
+    { label: 'H2H', games: h2h },
+    ...yearGroups.map(([year, yGames]) => ({ label: String(year), games: yGames })),
+  ];
+  return entries
+    .map(({ label, games: g }) => {
+      if (!g.length) {
+        return `<div class="prop-quickstat"><span class="prop-quickstat-label">${label}</span><span class="prop-quickstat-value">—</span></div>`;
+      }
+      const hits = g.filter((x) => isHit(item, x.statValue)).length;
+      const pct = Math.round((hits / g.length) * 100);
+      return `<div class="prop-quickstat"><span class="prop-quickstat-label">${label}</span><span class="prop-quickstat-value ${pct >= 50 ? 'good' : 'bad'}">${pct}%</span></div>`;
+    })
+    .join('');
+}
+
+const PROP_CHART_WINDOW = 20;
+
+// Per-game bar chart -- each bar is one game's stat value, colored by
+// isHit (same hit/miss logic the old dot-based view used), with a dashed
+// line at the prop's own betting line and a value label above each bar.
+// Hover details are wired up separately by bindPropChartTooltip once this
+// HTML is actually in the DOM (an SVG string alone can't carry live event
+// listeners).
+function propChartBlock(item, games, h2h, coverage) {
+  const quickStatsHtml = propChartQuickStats(item, games, h2h);
+  const windowGames = games.slice(0, PROP_CHART_WINDOW);
+  // build_game_log returns newest-first; a trend chart reads naturally
+  // left-to-right as oldest-to-newest, so reverse just for display.
+  const chartGames = [...windowGames].reverse();
+  const hits = windowGames.filter((g) => isHit(item, g.statValue)).length;
+  const hitPct = windowGames.length ? Math.round((hits / windowGames.length) * 100) : 0;
+  const values = windowGames.map((g) => g.statValue).filter((v) => v != null);
+  const avg = values.length ? values.reduce((a, b) => a + b, 0) / values.length : null;
+  const sortedVals = [...values].sort((a, b) => a - b);
+  const median = sortedVals.length
+    ? sortedVals.length % 2
+      ? sortedVals[(sortedVals.length - 1) / 2]
+      : (sortedVals[sortedVals.length / 2 - 1] + sortedVals[sortedVals.length / 2]) / 2
+    : null;
+
+  const headerHtml = `
+    <div class="prop-chart-header">
+      <div class="prop-chart-title-row">
+        <span class="prop-chart-window">Last ${windowGames.length || PROP_CHART_WINDOW}</span>
+        ${windowGames.length ? `<span class="prop-chart-hitrate ${hitPct >= 50 ? 'good' : 'bad'}">${hitPct}%</span><span class="prop-chart-hitrate-detail">${hits} of ${windowGames.length}</span>` : ''}
+      </div>
+      <div class="prop-quickstat-grid">${quickStatsHtml}</div>
+    </div>`;
+
+  if (!chartGames.length) {
+    return `${headerHtml}<p class="form-note">No recent games found.</p><p class="form-note">${coverageNote(coverage, games.length, item)}</p>`;
+  }
+
+  const line = item.line != null ? Number(item.line) : null;
+  const maxVal = Math.max(...chartGames.map((g) => g.statValue ?? 0), line ?? 0, 1) * 1.08;
+  const chartW = 700;
+  const chartH = 220;
+  const padX = 8;
+  const padTop = 20;
+  const padBottom = 4;
+  const plotW = chartW - padX * 2;
+  const plotH = chartH - padTop - padBottom;
+  const barGap = 4;
+  const barW = Math.max(5, plotW / chartGames.length - barGap);
+  const yPos = (v) => padTop + plotH - (v / maxVal) * plotH;
+
+  const bars = chartGames
+    .map((g, i) => {
+      const x = padX + i * (barW + barGap);
+      const v = g.statValue ?? 0;
+      const y = yPos(v);
+      const barH = Math.max(padTop + plotH - y, 1);
+      const hit = isHit(item, g.statValue);
+      const cls = hit == null ? 'neutral' : hit ? 'hit' : 'miss';
+      return `<g class="prop-bar-group" data-idx="${i}">
+        <rect class="prop-bar-hit-area" x="${x - barGap / 2}" y="${padTop}" width="${barW + barGap}" height="${plotH}" fill="transparent"/>
+        <rect class="prop-bar ${cls}" x="${x}" y="${y}" width="${barW}" height="${barH}" rx="3"/>
+        <text class="prop-bar-value ${cls}" x="${x + barW / 2}" y="${Math.max(y - 5, 11)}" text-anchor="middle">${v}</text>
+      </g>`;
+    })
+    .join('');
+
+  const dashedLine = line != null
+    ? `<line class="prop-line-marker" x1="${padX}" x2="${chartW - padX}" y1="${yPos(line)}" y2="${yPos(line)}"/>`
+    : '';
+
+  const firstDate = formatShortDate(chartGames[0].date);
+  const lastDate = formatShortDate(chartGames[chartGames.length - 1].date);
+
+  return `
+    ${headerHtml}
+    <div class="prop-chart-avgmed">Average: <strong>${avg != null ? avg.toFixed(2) : '—'}</strong> &nbsp; Median: <strong>${median != null ? median : '—'}</strong></div>
+    <div class="prop-chart-wrap">
+      <svg class="prop-chart-svg" viewBox="0 0 ${chartW} ${chartH}" preserveAspectRatio="none">
+        ${dashedLine}
+        ${bars}
+      </svg>
+      <div class="prop-chart-xaxis"><span>${firstDate}</span><span>${lastDate}</span></div>
+      <div class="prop-chart-tooltip" hidden></div>
+    </div>
+    <p class="form-note">Bars show each game's ${item.statLabel || 'value'}${line != null ? `; dashed line marks the ${line} line` : ''}. Hover a bar for matchup details.</p>
+    <p class="form-note">${coverageNote(coverage, games.length, item)}</p>
+  `;
+}
+
+// Wires up hover/move/leave listeners on each bar once propChartBlock's
+// HTML is actually in the DOM -- has to happen after innerHTML assignment
+// since a plain HTML string can't carry live JS event listeners.
+function bindPropChartTooltip(container, item, games) {
+  const svg = container.querySelector('.prop-chart-svg');
+  const tooltip = container.querySelector('.prop-chart-tooltip');
+  const wrap = container.querySelector('.prop-chart-wrap');
+  if (!svg || !tooltip || !wrap) return;
+  const chartGames = [...games.slice(0, PROP_CHART_WINDOW)].reverse();
+
+  svg.querySelectorAll('.prop-bar-group').forEach((group) => {
+    const g = chartGames[Number(group.dataset.idx)];
+    if (!g) return;
+    const show = (evt) => {
+      const rect = wrap.getBoundingClientRect();
+      const x = evt.clientX - rect.left;
+      const y = evt.clientY - rect.top;
+      const scoreLine = g.ownScore != null && g.opponentScore != null
+        ? `<div class="prop-tooltip-score">${g.ownName || 'Own'} ${g.ownScore} : ${g.opponentScore} ${g.opponentName || 'Opp'}</div>`
+        : `<div class="prop-tooltip-score">vs ${g.opponentName || 'Opponent'}</div>`;
+      tooltip.innerHTML = `
+        <div class="prop-tooltip-date">${formatShortDate(g.date)}</div>
+        ${scoreLine}
+        <div class="prop-tooltip-stat"><span>${item.statLabel || 'Value'}</span><strong>${g.statValue}</strong></div>
+      `;
+      tooltip.hidden = false;
+      tooltip.style.left = `${Math.min(Math.max(x, 64), rect.width - 64)}px`;
+      tooltip.style.top = `${Math.max(y - 14, 8)}px`;
+    };
+    const hide = () => { tooltip.hidden = true; };
+    group.addEventListener('mouseenter', show);
+    group.addEventListener('mousemove', show);
+    group.addEventListener('mouseleave', hide);
+  });
+}
+
 async function renderRecentForm(item) {
   const container = document.getElementById('recent-form');
   if (!container) return;
@@ -690,19 +858,8 @@ async function renderRecentForm(item) {
       statID: item.statID,
       opponentTeamID: item.opponentTeamID,
     });
-    const last5 = games.slice(0, 5);
-    const last10 = games.slice(0, 10);
-    const last5H2H = h2h.slice(0, 5);
-    container.innerHTML = `
-      <h3>Recent form</h3>
-      <div class="form-row"><span class="form-label">Last 5</span><span class="form-dots">${formGuideDots(last5, item)}</span><span class="form-rate">${hitRateLabel(last5, item)}</span></div>
-      <div class="form-row"><span class="form-label">Last 10</span><span class="form-dots">${formGuideDots(last10, item)}</span><span class="form-rate">${hitRateLabel(last10, item)}</span></div>
-      <div class="form-row"><span class="form-label">All seasons</span><span class="form-dots">${formGuideDots(games, item)}</span><span class="form-rate">${hitRateLabel(games, item)}</span></div>
-      <div class="form-row"><span class="form-label">Last 5 H2H</span><span class="form-dots">${formGuideDots(last5H2H, item)}</span><span class="form-rate">${hitRateLabel(last5H2H, item)}</span></div>
-      <div class="form-row"><span class="form-label">All-time H2H</span><span class="form-dots">${formGuideDots(h2h, item)}</span><span class="form-rate">${hitRateLabel(h2h, item)}</span></div>
-      <p class="form-note">${recentFormCaption(item)}</p>
-      <p class="form-note">${coverageNote(coverage, games.length, item)}</p>
-    `;
+    container.innerHTML = `<h3>Recent form</h3>${propChartBlock(item, games, h2h, coverage)}`;
+    bindPropChartTooltip(container, item, games);
   } catch (err) {
     container.innerHTML = `<p class="form-note">Recent form unavailable (${err.message}).</p>`;
   }
