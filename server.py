@@ -215,6 +215,20 @@ SGO_RATE_LIMIT_PER_MINUTE = 8
 
 
 def _sgo_rate_limit_wait():
+    # Hard ceiling on total wait, not just an internal implementation detail:
+    # without this, enough concurrent SportsGameOdds-dependent requests
+    # piling up at once (e.g. right after a deploy restart wipes the cache
+    # and several browser tabs' cold loads all land together) queue up
+    # behind each other with no bound, and each one holds its connection
+    # slot in BoundedThreadingHTTPServer's semaphore for the ENTIRE wait --
+    # a real production incident where the whole server (including plain
+    # static file requests) became unresponsive for minutes, because every
+    # one of a small number of connection slots was consumed by a request
+    # just sitting in this queue. Failing fast past this ceiling means a
+    # request under heavy load gets a clear, immediately-retryable error
+    # instead of hanging -- the frontend already has graceful fallbacks
+    # (sample data, an error banner) for exactly this shape of failure.
+    deadline = time.time() + 15
     while True:
         with _sgo_rate_lock:
             now = time.time()
@@ -224,6 +238,8 @@ def _sgo_rate_limit_wait():
                 _sgo_request_times.append(now)
                 return
             sleep_for = 60 - (now - _sgo_request_times[0]) + 0.05
+        if time.time() + sleep_for > deadline:
+            raise UpstreamError(503, "Server is busy (rate-limit queue full) -- please retry in a few seconds.")
         time.sleep(max(sleep_for, 0.05))
 
 
@@ -2181,8 +2197,20 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
     default) means these still don't block process shutdown; this only
     adds an upper bound on how many can run at once, queuing the rest
     briefly via the semaphore rather than spawning unboundedly.
+
+    Set much higher than the original 64 after a real incident: a request
+    blocked inside _sgo_rate_limit_wait() holds its connection slot for the
+    ENTIRE time it's waiting (up to 15s now that that wait has a hard
+    ceiling -- see _sgo_rate_limit_wait), and at only 64 slots, enough
+    concurrent SportsGameOdds-dependent requests piling up after a cold
+    restart was enough to consume every slot and make the ENTIRE server --
+    including plain static file requests, which need no rate limiting at
+    all -- stop accepting any new connection for minutes. These are cheap
+    sleeping threads (blocked on time.sleep(), not doing CPU work), so a
+    much higher ceiling costs little; it exists at all only as a backstop
+    against genuinely unbounded growth, not as a tight resource budget.
     """
-    _connection_semaphore = threading.Semaphore(64)
+    _connection_semaphore = threading.Semaphore(300)
 
     def process_request(self, request, client_address):
         self._connection_semaphore.acquire()
