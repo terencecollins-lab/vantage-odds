@@ -1811,35 +1811,53 @@ def compute_best_no_vig():
 
 _best_no_vig_lock = threading.Lock()
 _best_no_vig_cache = {"payload": None, "computed_at": 0}
-# 41 leagues at SGO_RATE_LIMIT_PER_MINUTE (8/min) is a little over 5 minutes
-# just for compute_best_no_vig's own sequential per-league fetches, before
-# this loop's own sleep even starts -- was 25s (slightly above
-# MARKETS_CACHE_TTL) back when this fan-out ran essentially unthrottled;
-# left at that pace now, a new cycle would start piling up behind the
-# previous one before it's even finished draining through the rate
-# limiter. 360s (6 min) gives a full cycle room to actually complete with
-# a little slack, rather than cycles perpetually queuing up.
-BEST_NO_VIG_REFRESH_INTERVAL = 360
+_best_no_vig_computing = False
+# 5 minutes -- a little longer than one full throttled computation cycle
+# (41 leagues at SGO_RATE_LIMIT_PER_MINUTE = 8/min is a little over 5 min
+# itself), so a fresh computation reliably finishes before its own result
+# would already be considered stale again.
+BEST_NO_VIG_STALE_AFTER = 300
 
 
-def refresh_best_no_vig_loop():
-    # This aggregation is identical for every viewer, so it's computed once on
-    # a timer and served from memory -- not recomputed per request. Besides
-    # being wasteful, computing it inline per HTTP request meant concurrent
-    # viewers (or the client's own 30s auto-refresh poll) could pile up
-    # duplicate fan-outs to all 41 leagues at once, which was OOM-crashing the
-    # process on Render's 512MB free tier (several of the newly added
-    # leagues -- MLB, NPB, KBO, CPBL, WBC, the winter-ball leagues -- each
-    # carry thousands of player-prop odds per event).
-    while True:
+def _maybe_start_best_no_vig_refresh():
+    """Kicks off a background computation only if the cached payload is
+    missing or stale AND nothing is already computing -- called from
+    handle_best_no_vig on every actual request to that endpoint, not on a
+    fixed timer. This is what makes Best No-Vig's SportsGameOdds request
+    volume genuinely zero while nobody's using that tab: the old
+    always-on background loop (refresh_best_no_vig_loop, now removed)
+    consumed roughly 41 requests every cycle continuously regardless of
+    viewers -- the large majority of the entire global rate-limit budget
+    (see SGO_RATE_LIMIT_PER_MINUTE) -- leaving almost nothing for
+    Markets/Hit Rate Filter/game-log requests to share even when Best
+    No-Vig itself had no viewers at all. The frontend's own 30s poll while
+    that tab is open (see NOVIG_REFRESH_INTERVAL_MS in app.js) is what now
+    drives staleness checks; once the tab closes, polling stops, and so
+    does all computation.
+    """
+    global _best_no_vig_computing
+    with _best_no_vig_lock:
+        payload = _best_no_vig_cache["payload"]
+        computed_at = _best_no_vig_cache["computed_at"]
+        is_stale = payload is None or (time.time() - computed_at) > BEST_NO_VIG_STALE_AFTER
+        if not is_stale or _best_no_vig_computing:
+            return
+        _best_no_vig_computing = True
+
+    def worker():
+        global _best_no_vig_computing
         try:
-            payload = compute_best_no_vig()
+            result = compute_best_no_vig()
             with _best_no_vig_lock:
-                _best_no_vig_cache["payload"] = payload
+                _best_no_vig_cache["payload"] = result
                 _best_no_vig_cache["computed_at"] = time.time()
         except Exception as e:
-            print(f"[vantage] best-no-vig background refresh failed: {e}")
-        time.sleep(BEST_NO_VIG_REFRESH_INTERVAL)
+            print(f"[vantage] best-no-vig on-demand refresh failed: {e}")
+        finally:
+            with _best_no_vig_lock:
+                _best_no_vig_computing = False
+
+    threading.Thread(target=worker, daemon=True).start()
 
 
 _golf_lock = threading.Lock()
@@ -1925,16 +1943,15 @@ class Handler(BaseHTTPRequestHandler):
     def handle_best_no_vig(self, parsed):
         if not self.require_api_key():
             return
+        _maybe_start_best_no_vig_refresh()
         with _best_no_vig_lock:
             payload = _best_no_vig_cache["payload"]
         if payload is None:
-            # Background refresh loop hasn't completed its first cycle yet
-            # (just after server startup). Computing all 41 leagues
-            # sequentially takes well over a minute on Render's free-tier
-            # CPU -- never do that inline on a request thread, since that's
-            # long enough to hit Render's own proxy timeout. The frontend
-            # already polls this endpoint every 30s, so it'll pick up the
-            # real result on its own shortly.
+            # No cached payload yet -- either the server just started, or
+            # this is the very first request Best No-Vig has ever seen.
+            # The line above already kicked off a background computation if
+            # needed; the frontend's own 30s poll (see NOVIG_REFRESH_INTERVAL_MS
+            # in app.js) will pick up the real result once it's ready.
             self.send_json(200, {"success": True, "items": [], "coverageSince": {}, "preparing": True})
             return
         self.send_json(200, payload)
@@ -2178,8 +2195,6 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
 if __name__ == "__main__":
     if not API_KEY:
         print("[vantage] WARNING: SPORTSGAMEODDS_API_KEY not found in environment or .env file.")
-    else:
-        threading.Thread(target=refresh_best_no_vig_loop, daemon=True).start()
     threading.Thread(target=refresh_golf_loop, daemon=True).start()
     threading.Thread(target=refresh_kbo_prewarm_loop, daemon=True).start()
     server = BoundedThreadingHTTPServer(("0.0.0.0", PORT), Handler)
