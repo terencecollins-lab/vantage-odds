@@ -136,6 +136,21 @@ body {
 }
 
 .kbo-batter-gamelog { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); }
+.kbo-batter-gamelog-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.kbo-batter-gamelog-head h4 { margin: 0; }
+.kbo-star-btn {
+  position: static;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+}
+.kbo-star-btn.active { color: #f5b400; }
 .kbo-batter-gamelog:first-of-type { margin-top: 0; padding-top: 0; border-top: none; }
 .kbo-batter-gamelog h4 { margin: 0 0 8px; font-size: 14px; }
 .kbo-row-empty td { color: var(--text-muted); font-style: italic; text-align: left; }

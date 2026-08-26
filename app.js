@@ -1272,7 +1272,15 @@ function mlbBatterCard(b) {
   const snapshot = c
     ? `${fmt(c.avg)} AVG vs. this pitcher (career) · ${c.homeRuns ?? 0} HR`
     : 'Tap for full splits & recent form';
+  // MLB batters aren't tied to a single betting line the way a prop item
+  // is, so they get their own watchlist-id namespace (mlb-player-{id})
+  // rather than reusing item.id -- shares the exact same state.watchlist
+  // Set/localStorage/header count as every other star in the app, just
+  // keyed distinctly so a batter and some unrelated prop can never collide.
+  const watchId = `mlb-player-${b.id}`;
+  const isWatched = state.watchlist.has(watchId);
   return `<article class="item-card mlb-player-card" data-batter-id="${b.id}">
+    <button class="star-btn ${isWatched ? 'active' : ''}" data-star="${watchId}" title="Toggle watchlist">${starIcon(isWatched)}</button>
     <div class="card-top"><span class="card-category">${b.position || 'Batter'}</span></div>
     <div class="item-name">${b.fullName}</div>
     <div class="rating-row">${snapshot}</div>
@@ -1301,6 +1309,19 @@ function bindMlbPlayerCards() {
     card.addEventListener('click', () => {
       const ctx = mlbBatterContext.get(card.dataset.batterId);
       if (ctx) openMlbPlayerModal(ctx.batter, ctx.pitcherId, ctx.opponentTeamID);
+    });
+  });
+  el.mlbMatchupContent.querySelectorAll('.star-btn').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggleWatchlist(btn.dataset.star);
+      // toggleWatchlist's own render() rebuilds the Markets tab's DOM (and
+      // the header count) but never touches the MLB tab's already-rendered
+      // cards -- patch this one button in place rather than re-fetching
+      // the whole matchup just to reflect one star's new state.
+      const isWatched = state.watchlist.has(btn.dataset.star);
+      btn.classList.toggle('active', isWatched);
+      btn.innerHTML = starIcon(isWatched);
     });
   });
 }
@@ -1686,13 +1707,24 @@ const kboChartPointsByBatter = new Map();
 
 function kboBatterGameLogBlock(b) {
   const s = b.stats[state.kboView];
+  // Same watchlist-id namespacing approach as MLB's batter cards
+  // (mlb-player-{id}) -- kbo-player-{id} keeps KBO batters, MLB batters,
+  // and regular prop items from ever colliding in the shared
+  // state.watchlist Set even if two different sports' numeric player ids
+  // happened to match.
+  const watchId = `kbo-player-${b.id}`;
+  const isWatched = state.watchlist.has(watchId);
+  const headHtml = `<div class="kbo-batter-gamelog-head">
+    <button class="star-btn kbo-star-btn ${isWatched ? 'active' : ''}" data-star="${watchId}" title="Toggle watchlist">${starIcon(isWatched)}</button>
+    <h4>${b.fullName}</h4>
+  </div>`;
   if (!s || !s.games.length) {
-    return `<div class="kbo-batter-gamelog"><h4>${b.fullName}</h4><p class="mlb-subtitle">No games in this window.</p></div>`;
+    return `<div class="kbo-batter-gamelog">${headHtml}<p class="mlb-subtitle">No games in this window.</p></div>`;
   }
   const points = kboGameChartPoints(s.games);
   kboChartPointsByBatter.set(String(b.id), points);
   return `<div class="kbo-batter-gamelog" data-kbo-chart="${b.id}">
-    <h4>${b.fullName}</h4>
+    ${headHtml}
     <div class="prop-chart-wrap">${buildBarChartSvg(points, { height: 140 })}<div class="prop-chart-tooltip" hidden></div></div>
     <div class="mlb-table-wrap">
       <table class="mlb-table">
@@ -1735,6 +1767,15 @@ function renderKboMatchup() {
   el.kboMatchupContent.querySelectorAll('[data-kbo-chart]').forEach((wrap) => {
     const points = kboChartPointsByBatter.get(wrap.dataset.kboChart);
     if (points) bindBarChartTooltip(wrap, points);
+  });
+  el.kboMatchupContent.querySelectorAll('.star-btn').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggleWatchlist(btn.dataset.star);
+      const isWatched = state.watchlist.has(btn.dataset.star);
+      btn.classList.toggle('active', isWatched);
+      btn.innerHTML = starIcon(isWatched);
+    });
   });
 }
 
