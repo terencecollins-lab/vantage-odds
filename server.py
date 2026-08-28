@@ -118,6 +118,58 @@ def _cache_set(key, ttl, value):
         _cache.popitem(last=False)
 
 
+CACHE_SNAPSHOT_PATH = os.path.join(SCRIPT_DIR, ".cache_snapshot.json")
+CACHE_SNAPSHOT_INTERVAL = 60  # seconds between periodic disk snapshots
+# The TTLs above (24h for game logs, 26h for KBO rosters/pages, etc.) only
+# protect against re-fetching within a single long-running process -- they
+# do nothing across a restart, since _cache is plain in-memory state that a
+# new process starts with empty. And restarts happen often here: every
+# deploy kills and restarts the systemd service. Without this, "cached for
+# 24 hours" was really "cached until the next deploy," which on a day with
+# several deploys could mean re-fetching the same still-genuinely-fresh
+# data (a finalized game's box score never changes) many times over,
+# burning scarce SportsGameOdds rate-limit budget for no reason. Snapshots
+# save periodically in the background (not on every write, since the cache
+# can hold multi-MB payloads and writing all of it synchronously on every
+# single _cache_set call would add real latency to the request path) and
+# restore on startup, skipping anything already expired by wall-clock time.
+
+
+def _save_cache_snapshot():
+    try:
+        snapshot = {k: [expires_at, value] for k, (expires_at, value) in _cache.items()}
+        tmp_path = CACHE_SNAPSHOT_PATH + ".tmp"
+        with open(tmp_path, "w") as f:
+            json.dump(snapshot, f)
+        os.replace(tmp_path, CACHE_SNAPSHOT_PATH)  # atomic on POSIX -- never leaves a half-written snapshot if the process dies mid-write
+    except Exception as e:
+        print(f"[vantage] cache snapshot save failed: {e}")
+
+
+def _load_cache_snapshot():
+    if not os.path.exists(CACHE_SNAPSHOT_PATH):
+        return
+    try:
+        with open(CACHE_SNAPSHOT_PATH) as f:
+            snapshot = json.load(f)
+    except Exception as e:
+        print(f"[vantage] cache snapshot load failed: {e}")
+        return
+    now = time.time()
+    restored = 0
+    for k, (expires_at, value) in snapshot.items():
+        if expires_at > now:
+            _cache[k] = (expires_at, value)
+            restored += 1
+    print(f"[vantage] Restored {restored} still-fresh cache entries from disk ({len(snapshot) - restored} expired entries skipped)")
+
+
+def _cache_snapshot_loop():
+    while True:
+        time.sleep(CACHE_SNAPSHOT_INTERVAL)
+        _save_cache_snapshot()
+
+
 def load_env_file(path=None):
     path = path or os.path.join(SCRIPT_DIR, ".env")
     if not os.path.exists(path):
@@ -2290,6 +2342,8 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
 if __name__ == "__main__":
     if not API_KEY:
         print("[vantage] WARNING: SPORTSGAMEODDS_API_KEY not found in environment or .env file.")
+    _load_cache_snapshot()
+    threading.Thread(target=_cache_snapshot_loop, daemon=True).start()
     threading.Thread(target=refresh_golf_loop, daemon=True).start()
     threading.Thread(target=refresh_kbo_prewarm_loop, daemon=True).start()
     server = BoundedThreadingHTTPServer(("0.0.0.0", PORT), Handler)
